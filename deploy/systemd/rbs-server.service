@@ -1,0 +1,18 @@
+[Unit]
+Description=rbs build server (resource-aware cargo job scheduler)
+Documentation=https://github.com/RhizoNymph/rust-build-server
+After=default.target
+
+[Service]
+Type=simple
+ExecStart={self_exe} server
+Restart=on-failure
+RestartSec=2
+Environment=RBS_LOG=info
+# cargo/rustc/kache are resolved from the user's PATH; keep ~/.cargo/bin and ~/.local/bin visible.
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

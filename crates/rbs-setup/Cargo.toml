@@ -1,0 +1,19 @@
+[package]
+name = "rbs-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+rbs-config = { version = "0.1.0", path = "../rbs-config" }
+rbs-proto = { version = "0.1.0", path = "../rbs-proto" }
+rbs-toolchain = { version = "0.1.0", path = "../rbs-toolchain" }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+toml = "1.1.4"
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"

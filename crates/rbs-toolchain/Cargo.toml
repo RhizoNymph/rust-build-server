@@ -1,0 +1,13 @@
+[package]
+name = "rbs-toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rbs-proto = { version = "0.1.0", path = "../rbs-proto" }
+thiserror = "2.0.20"
+
+[dev-dependencies]
+tempfile = "3.27.0"
