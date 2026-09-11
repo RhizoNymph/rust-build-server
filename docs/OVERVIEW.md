@@ -35,7 +35,8 @@ Overview:
       │    remote: `ssh node0 .local/bin/rbs proxy` → bridges stdio to node0's unix
       │            socket; probe = Hello/Status round trip (gives RTT +
       │            capacity). Reject if RTT > max_rtt_ms, server saturated,
-      │            ssh fails, or toolchain mismatch (→ hard error, no fallback).
+      │            ssh fails, or toolchain mismatch (pinned workspace → hard error,
+      │            no fallback; unpinned → loud warning, next backend).
       │    local:  connect ~/.local/state/rbs/server.sock; autostart if absent.
       │    plain:  exec real cargo with RUSTC_WRAPPER=kache.
       ├─ remote only: rsync worktree → node0 (same absolute path), gitignore

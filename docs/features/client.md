@@ -45,7 +45,8 @@ a build ran where it did.
    submit streams JobEvents: Stdout→stdout, Stderr→stderr, Queued → info
    "queued (position N)". SIGINT/SIGTERM → send Cancel{id}, keep draining to Exited.
      Exited(status)            → go to 7
-     Rejected::ToolchainMismatch → print rbs_toolchain::Mismatch to stderr, exit 1, NO fallback
+     Rejected::ToolchainMismatch → pinned workspace: print rbs_toolchain::Mismatch, exit 1, NO fallback;
+                                    unpinned: loud warning + next backend
      Rejected::Saturated / other / transport error → warn, next backend
 7. if backend == remote && cargo policy && argv[1] == "build" && status.success()
       && post_build == pull_and_link:
@@ -102,6 +103,6 @@ discovered later in the chain; failure there falls through like any other).
 - The remote `rbs` is invoked by explicit path (`[remote] remote_bin`, default `.local/bin/rbs`) because non-interactive ssh shells lack `~/.local/bin` on PATH.
 - Exit code of the agent's `cargo` == exit code of the job (or 1 for rbs errors; rbs errors go to stderr prefixed `rbs:`).
 - Interactive signals are forwarded as `Cancel`; the ssh child is killed when the connection is dropped.
-- Toolchain mismatch never falls back.
+- Toolchain mismatch is contract-aware: if the workspace has a `rust-toolchain.toml`/`rust-toolchain` file (`ShimInput.pinned`, via `rbs_toolchain::find_toolchain_file`), mismatch is a hard error with no fallback; an unpinned workspace gets a loud stderr warning ("pin the workspace to build remotely") and falls through to the next backend.
 - All fallbacks are logged at `warn` with the reason.
 - `rbs status` and the shim never contact the remote when `remote.enabled = false` or mode ∈ {local, plain}.

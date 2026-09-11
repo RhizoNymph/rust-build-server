@@ -23,6 +23,7 @@ installing toolchains.
 - `crates/rbs-toolchain/src/lib.rs` — `fingerprint(cwd) -> Result<ToolchainFingerprint, ToolchainError>`, `check(client, server) -> Result<(), Mismatch>`, `parse_rustc_vv(&str)`.
 
 ## Invariants
+- `find_toolchain_file(cwd)` walks ancestors for `rust-toolchain.toml`/`rust-toolchain` (nearest wins) — the client uses it to decide whether a mismatch is a broken contract (hard error) or an unpinned workspace (warn + fall back).
 - Every subprocess spawned by `fingerprint` carries `RBS_SHIM_ACTIVE=1` (`SHIM_GUARD_ENV`) so the `cargo` shim execs the real cargo instead of recursing.
 - Equality = `rustc_commit` && `host` (cargo version/toolchain name are informational; they are printed but do not decide).
 - Nightly without a pinned date is flagged in the hint text (commit hash will drift daily).

@@ -89,6 +89,17 @@ pub fn check(
     }
 }
 
+/// Find the toolchain contract file (`rust-toolchain.toml` or `rust-toolchain`)
+/// governing `cwd`, walking up the directory tree exactly as rustup does.
+pub fn find_toolchain_file(cwd: &Path) -> Option<std::path::PathBuf> {
+    cwd.ancestors().find_map(|d| {
+        ["rust-toolchain.toml", "rust-toolchain"]
+            .iter()
+            .map(|n| d.join(n))
+            .find(|p| p.is_file())
+    })
+}
+
 /// Parsed view of `rustc -vV`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustcVv {
@@ -183,6 +194,25 @@ mod tests {
             cargo_version: format!("cargo {version}"),
             toolchain_name: format!("{version}-x86_64-unknown-linux-gnu"),
         }
+    }
+
+    #[test]
+    fn finds_toolchain_file_in_ancestors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("a/b")).expect("mkdir");
+        assert_eq!(find_toolchain_file(&root.join("a/b")), None);
+        std::fs::write(root.join("a/rust-toolchain.toml"), "").expect("write");
+        assert_eq!(
+            find_toolchain_file(&root.join("a/b")),
+            Some(root.join("a/rust-toolchain.toml"))
+        );
+        std::fs::write(root.join("a/b/rust-toolchain"), "").expect("write");
+        assert_eq!(
+            find_toolchain_file(&root.join("a/b")),
+            Some(root.join("a/b/rust-toolchain")),
+            "nearest wins"
+        );
     }
 
     #[test]

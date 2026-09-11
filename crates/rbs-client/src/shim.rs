@@ -33,11 +33,17 @@ pub struct ShimInput {
     pub env: BTreeMap<String, String>,
     /// Apply cargo policy (`local_subcommands`, post-build pull-and-link).
     pub cargo_policy: bool,
+    /// Whether the workspace declares a toolchain contract
+    /// (`rust-toolchain.toml` / `rust-toolchain`). A mismatch is only a hard
+    /// error when a contract exists; unpinned workspaces fall back with a
+    /// loud warning instead.
+    pub pinned: bool,
 }
 
 impl ShimInput {
     /// Build from the process environment for `argv` (already including `argv[0]`).
     pub fn from_env(cwd: PathBuf, argv: Vec<String>, cfg: Config, cargo_policy: bool) -> Self {
+        let pinned = rbs_toolchain::find_toolchain_file(&cwd).is_some();
         use std::io::IsTerminal;
         let vars: Vec<(String, String)> = std::env::vars().collect();
         let env = rbs_config::filter_env(
@@ -57,6 +63,7 @@ impl ShimInput {
             },
             env,
             cargo_policy,
+            pinned,
         }
     }
 
@@ -297,8 +304,19 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
                     server_host,
                     server,
                 };
-                hooks.stderr(format!("rbs: error: {m}").as_bytes());
-                return 1;
+                if input.pinned {
+                    hooks.stderr(format!("rbs: error: {m}").as_bytes());
+                    return 1;
+                }
+                // No rust-toolchain.toml in the workspace: there was never a
+                // contract to violate, so degrade instead of breaking the build.
+                hooks.stderr(
+                    format!(
+                        "rbs: warning: {m}  note: this workspace has no rust-toolchain.toml; falling back to a local build. Pin the workspace to build remotely.\n"
+                    )
+                    .as_bytes(),
+                );
+                tracing::warn!(backend = %backend, "toolchain mismatch in unpinned workspace; trying next backend");
             }
             Outcome::Saturated => {
                 tracing::warn!(backend = %backend, "server saturated; trying next backend");
@@ -562,6 +580,7 @@ mod tests {
             },
             env: BTreeMap::from([("RUSTFLAGS".to_string(), "-Cdebuginfo=0".to_string())]),
             cargo_policy: true,
+            pinned: true,
         }
     }
 
@@ -638,6 +657,36 @@ mod tests {
         }));
         let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), None);
         assert_eq!(run(input(&["check"], Mode::Auto), &hooks).await, 137);
+    }
+
+    #[tokio::test]
+    async fn unpinned_mismatch_warns_and_falls_back() {
+        let script = vec![
+            hello_msg("node0"),
+            status_msg(true),
+            ev(JobEvent::Rejected {
+                id: JobId(1),
+                reason: RejectReason::ToolchainMismatch {
+                    server: fp("def"),
+                    client: fp("abc"),
+                },
+            }),
+        ];
+        let mut local_script = vec![hello_msg("laptop")];
+        local_script.extend(job_events(0));
+        let hooks = TestHooks::new(
+            Some(FakeTransport::scripted(script)),
+            Some(FakeTransport::scripted(local_script)),
+        );
+        let mut inp = input(&["build"], Mode::Auto);
+        inp.pinned = false;
+        let code = run(inp, &hooks).await;
+        assert_eq!(code, 0, "must fall through to the local backend");
+        let err = String::from_utf8_lossy(&hooks.calls().err).to_string();
+        assert!(
+            err.contains("no rust-toolchain.toml"),
+            "warning must explain the fallback: {err}"
+        );
     }
 
     #[tokio::test]
