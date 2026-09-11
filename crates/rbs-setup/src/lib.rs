@@ -20,7 +20,10 @@ use std::path::PathBuf;
 pub use doctor::{REQUIRED_BINARIES, doctor_with};
 pub use paths::{Paths, PathsError};
 pub use runner::{Output, Runner, RunnerError, SystemRunner};
-pub use setup::{KACHE_CONFIG_DEFAULT, SetupError, generate_config, render_unit, setup_with};
+pub use setup::{
+    KACHE_CONFIG_DEFAULT, STORE_GC_TIMER, SetupError, generate_config, render_store_gc_service,
+    render_unit, setup_with,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {

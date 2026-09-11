@@ -42,6 +42,11 @@ job_mem_max_gib = 24
 queue_limit = 32
 job_timeout_secs = 3600
 
+[store]                        # shared kache S3 store GC (rbs store-gc; timer on node0)
+max_size_gib = 40              # size cap; 0 = GC disabled
+low_watermark_percent = 90     # evict down to this fraction of the cap
+min_age_hours = 24             # never evict objects newer than this
+
 [sync]
 rsync_path = "rsync"
 extra_excludes = []

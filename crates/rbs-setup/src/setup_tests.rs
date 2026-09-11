@@ -3,8 +3,8 @@ use std::path::Path;
 use rbs_config::Config;
 
 use crate::setup::{
-    KACHE_CONFIG_DEFAULT, SetupError, aws_credentials_with_profile, generate_config, kache_config,
-    line_diff, render_unit, setup_with,
+    KACHE_CONFIG_DEFAULT, STORE_GC_TIMER, SetupError, aws_credentials_with_profile,
+    generate_config, kache_config, line_diff, render_store_gc_service, render_unit, setup_with,
 };
 use crate::testing::{FakeRunner, TempHome, mode_of, read};
 use crate::{Role, SetupOpts};
@@ -195,6 +195,57 @@ fn systemd_unit_content_and_commands() {
     assert!(r.called_with("systemctl", &["--user", "daemon-reload"]));
     assert!(r.called_with("systemctl", &["--user", "enable", "--now", "rbs-server"]));
     assert!(r.called_with("kache", &["daemon", "install"]));
+}
+
+#[test]
+fn node0_installs_store_gc_timer_units() {
+    let unit = render_store_gc_service(Path::new("/home/u/.local/bin/rbs"));
+    assert!(unit.contains("Type=oneshot\n"));
+    assert!(unit.contains("ExecStart=/home/u/.local/bin/rbs store-gc\n"));
+    assert!(unit.contains("/snap/bin"));
+    assert!(!unit.contains("{self_exe}"));
+    assert!(STORE_GC_TIMER.contains("OnCalendar=daily\n"));
+    assert!(STORE_GC_TIMER.contains("RandomizedDelaySec=1h\n"));
+    assert!(STORE_GC_TIMER.contains("Persistent=true\n"));
+    assert!(STORE_GC_TIMER.contains("WantedBy=timers.target\n"));
+
+    let th = TempHome::new();
+    th.write_minio_env("AK", "SK");
+    let r = runner();
+    setup_with(&r, &th.paths, &opts(Role::Node0, &th)).expect("setup");
+    let service = read(&th.paths.systemd_user_dir().join("rbs-store-gc.service"));
+    assert_eq!(service, render_store_gc_service(&th.paths.self_exe));
+    let timer = read(&th.paths.systemd_user_dir().join("rbs-store-gc.timer"));
+    assert_eq!(timer, STORE_GC_TIMER);
+    assert!(r.called_with("systemctl", &["--user", "daemon-reload"]));
+    assert!(r.called_with(
+        "systemctl",
+        &["--user", "enable", "--now", "rbs-store-gc.timer"]
+    ));
+}
+
+#[test]
+fn laptop_does_not_install_store_gc_units() {
+    let th = TempHome::new();
+    th.write_minio_env("AK", "SK");
+    let r = runner();
+    setup_with(&r, &th.paths, &opts(Role::Laptop, &th)).expect("setup");
+    assert!(
+        !th.paths
+            .systemd_user_dir()
+            .join("rbs-store-gc.service")
+            .exists()
+    );
+    assert!(
+        !th.paths
+            .systemd_user_dir()
+            .join("rbs-store-gc.timer")
+            .exists()
+    );
+    assert!(!r.called_with(
+        "systemctl",
+        &["--user", "enable", "--now", "rbs-store-gc.timer"]
+    ));
 }
 
 #[test]

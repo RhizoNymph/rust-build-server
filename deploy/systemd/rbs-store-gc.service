@@ -1,0 +1,10 @@
+[Unit]
+Description=rbs shared store garbage collection (kache S3 size cap, LFU eviction)
+Documentation=https://github.com/RhizoNymph/rust-build-server
+
+[Service]
+Type=oneshot
+ExecStart={self_exe} store-gc
+Environment=RBS_LOG=info
+# cargo/rustc/kache are resolved from the user's PATH; keep ~/.cargo/bin and ~/.local/bin visible.
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin

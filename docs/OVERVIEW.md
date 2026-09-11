@@ -85,6 +85,11 @@ Features Index:
     entry_points: ["rbs setup", "rbs doctor", deploy/]
     depends_on: [config, client]
     doc: docs/features/setup.md
+  store_gc:
+    description: Size cap + LFU eviction for the shared kache S3 store (daily timer on node0).
+    entry_points: [crates/rbs-store/src/lib.rs, "rbs store-gc"]
+    depends_on: [config, setup]
+    doc: docs/features/store-gc.md
 ```
 
 ## Environment facts the design relies on
