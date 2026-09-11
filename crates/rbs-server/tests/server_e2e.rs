@@ -337,7 +337,7 @@ async fn second_job_queues_until_first_exits() {
     a.hello().await;
     a.send(&ClientMessage::Submit(request(
         cwd.path(),
-        &["sleep", "0.3"],
+        &["sleep", "2"],
         fp.clone(),
     )))
     .await;
@@ -348,7 +348,7 @@ async fn second_job_queues_until_first_exits() {
     b.hello().await;
     b.send(&ClientMessage::Submit(request(
         cwd.path(),
-        &["sleep", "0.3"],
+        &["sleep", "2"],
         fp,
     )))
     .await;
@@ -388,7 +388,7 @@ async fn second_job_queues_until_first_exits() {
         JobEvent::Started { id } => assert_eq!(id, b_id),
         other => panic!("expected Started, got {other:?}"),
     }
-    assert!(started_at.elapsed() < Duration::from_secs(2));
+    assert!(started_at.elapsed() < Duration::from_secs(4));
     let b_events = run_to_completion(&mut b).await;
     assert!(matches!(
         b_events.last(),
