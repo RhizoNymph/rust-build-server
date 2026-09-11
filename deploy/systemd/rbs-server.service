@@ -10,7 +10,7 @@ Restart=on-failure
 RestartSec=2
 Environment=RBS_LOG=info
 # cargo/rustc/kache are resolved from the user's PATH; keep ~/.cargo/bin and ~/.local/bin visible.
-Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
 KillMode=control-group
 TimeoutStopSec=30
 

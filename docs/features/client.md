@@ -32,7 +32,8 @@ a build ran where it did.
 3. fp = rbs_toolchain::fingerprint(cwd)   (auto: failure → warn + plain; forced: exit 1)
 4. if mode ∈ {auto, remote} && remote.enabled:
      conn = SshTransport.connect() ; probe(conn) = Hello + Status, both under
-     connect_timeout_ms; RTT = Hello round trip. The handshaken conn is kept for Submit.
+     connect_timeout_ms; RTT = the Status round trip (Hello pays the ssh
+     session handshake, ~200 ms even on a LAN, and must not count). The handshaken conn is kept for Submit.
 5. decision = backend::select(mode, probe, local configured, cfg)   # pure table
    every skipped backend is logged at warn with its reason; empty chain → exit 1
 6. for backend in decision.chain:

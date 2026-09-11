@@ -298,12 +298,17 @@ pub struct ProbeResult {
 /// the full Hello round trip (what a job submission will pay), measured on
 /// this already-open connection.
 pub async fn probe(conn: &mut dyn Conn) -> Result<ProbeResult, TransportError> {
-    let t0 = Instant::now();
     hello(conn).await?;
-    let rtt = t0.elapsed();
+    // Time the Status exchange, not Hello: the first round trip over ssh pays
+    // for the whole session handshake (~200 ms even on a sub-ms LAN) and would
+    // make every remote look slower than max_rtt_ms.
+    let t0 = Instant::now();
     conn.send(ClientMessage::Status).await?;
     match conn.recv().await? {
-        Some(ServerMessage::Status(status)) => Ok(ProbeResult { status, rtt }),
+        Some(ServerMessage::Status(status)) => Ok(ProbeResult {
+            status,
+            rtt: t0.elapsed(),
+        }),
         Some(ServerMessage::Error(e)) => Err(TransportError::Protocol(e.message)),
         Some(other) => Err(TransportError::Unexpected(format!("{other:?}"))),
         None => Err(TransportError::Closed),
