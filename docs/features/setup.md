@@ -34,9 +34,15 @@ Non-scope: installing rustup/toolchains, running MinIO (documented in
      TOML), else `SetupError::KacheRemoteNotConfigured`.
   3. Write `~/.config/systemd/user/rbs-server.service` from
      `deploy/systemd/rbs-server.service` (`include_str!`, `{self_exe}`
-     substituted), `systemctl --user daemon-reload`, `systemctl --user enable
-     --now rbs-server`, then `kache daemon install` (a failure mentioning
-     "already" is ignored).
+     substituted). Role node0 only: also write `rbs-store-gc.service`
+     (oneshot, `ExecStart={self_exe} store-gc`) and `rbs-store-gc.timer`
+     (daily, `RandomizedDelaySec=1h`, `Persistent=true`) from
+     `deploy/systemd/`. Then `systemctl --user daemon-reload`, `systemctl
+     --user enable --now rbs-server` (node0 additionally `enable --now
+     rbs-store-gc.timer`), then `kache daemon install` (a failure mentioning
+     "already" is ignored). The laptop role never installs the GC units:
+     only node0's kache index has the global hit-count view, and one evictor
+     per store avoids races.
   4. `~/.local/share/rbs/shim/cargo` → hardlink to `self_exe`, symlink
      fallback; an existing link is replaced. Prints
      `export PATH="$HOME/.local/share/rbs/shim:$PATH"`.
@@ -80,8 +86,8 @@ test spawns a process, reads the real `$HOME`, or touches the network.
 - `crates/rbs-setup/src/lib.rs` — public API: `Role`, `SetupOpts`, `DoctorOpts`,
   `Check`, `DoctorReport`, `setup`, `doctor`; re-exports `setup_with`,
   `doctor_with`, `Paths`, `Runner`, `SystemRunner`, `Output`, `RunnerError`,
-  `SetupError`, `generate_config`, `render_unit`, `REQUIRED_BINARIES`,
-  `KACHE_CONFIG_DEFAULT`.
+  `SetupError`, `generate_config`, `render_unit`, `render_store_gc_service`,
+  `STORE_GC_TIMER`, `REQUIRED_BINARIES`, `KACHE_CONFIG_DEFAULT`.
 - `crates/rbs-setup/src/runner.rs` — `Runner` trait, `Output{status, stdout, stderr}`, `SystemRunner`.
 - `crates/rbs-setup/src/paths.rs` — `Paths` (+ `rbs_config()`, `minio_env()`,
   `kache_config()`, `aws_credentials()`, `systemd_user_dir()`, `shim_dir()`,
@@ -90,9 +96,12 @@ test spawns a process, reads the real `$HOME`, or touches the network.
   `kache_config`, `render_unit`, `line_diff`, `aws_credentials_with_profile`.
 - `crates/rbs-setup/src/doctor.rs` — check table above.
 - `crates/rbs-setup/src/testing.rs` (cfg(test)) — `FakeRunner`, `TempHome`.
-- `crates/rbs-setup/src/{setup_tests,doctor_tests}.rs` — 29 tests.
+- `crates/rbs-setup/src/{setup_tests,doctor_tests}.rs` — 31 tests.
 - `deploy/systemd/rbs-server.service` — unit template (`ExecStart={self_exe} server`,
   `Restart=on-failure`, `Environment=RBS_LOG=info`, `WantedBy=default.target`).
+- `deploy/systemd/rbs-store-gc.service`, `deploy/systemd/rbs-store-gc.timer` —
+  node0-only store GC units (see `docs/features/store-gc.md`); rendered via
+  `render_store_gc_service` / `STORE_GC_TIMER`.
 - `deploy/minio.md` — the `rbs-minio` container and bucket; `deploy/README.md` —
   laptop + node0 bring-up, toolchain pinning, PATH line for agents.
 

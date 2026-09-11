@@ -58,6 +58,15 @@ enum Cmd {
         #[arg(long)]
         remote: bool,
     },
+    /// Garbage-collect the shared kache S3 store (size cap + LFU eviction).
+    StoreGc {
+        /// Print the eviction plan without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override `[store] max_size_gib` for this run.
+        #[arg(long)]
+        max_size_gib: Option<u32>,
+    },
 }
 
 fn parse_mode(s: &str) -> Result<Mode, String> {
@@ -275,6 +284,18 @@ async fn cli_main() -> anyhow::Result<i32> {
                 );
             }
             Ok(if report.ok() { 0 } else { 1 })
+        }
+        Cmd::StoreGc {
+            dry_run,
+            max_size_gib,
+        } => {
+            let report = rbs_store::run_gc(rbs_store::GcOpts {
+                dry_run,
+                max_size_gib_override: max_size_gib,
+            })
+            .await?;
+            println!("{report}");
+            Ok(0)
         }
     }
 }

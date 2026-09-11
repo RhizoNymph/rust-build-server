@@ -13,6 +13,7 @@ rbs-config = { version = "0.1.0", path = "../rbs-config" }
 rbs-proto = { version = "0.1.0", path = "../rbs-proto" }
 rbs-server = { version = "0.1.0", path = "../rbs-server" }
 rbs-setup = { version = "0.1.0", path = "../rbs-setup" }
+rbs-store = { version = "0.1.0", path = "../rbs-store" }
 rbs-sync = { version = "0.1.0", path = "../rbs-sync" }
 rbs-toolchain = { version = "0.1.0", path = "../rbs-toolchain" }
 thiserror = "2.0.20"

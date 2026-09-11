@@ -20,6 +20,10 @@ pub const DEFAULT_BUCKET: &str = "kache";
 pub const AWS_PROFILE: &str = "rbs";
 const UNIT_TEMPLATE: &str = include_str!("../../../deploy/systemd/rbs-server.service");
 const UNIT_NAME: &str = "rbs-server";
+const GC_SERVICE_TEMPLATE: &str = include_str!("../../../deploy/systemd/rbs-store-gc.service");
+/// Timer unit text (no substitutions needed).
+pub const STORE_GC_TIMER: &str = include_str!("../../../deploy/systemd/rbs-store-gc.timer");
+const GC_UNIT_NAME: &str = "rbs-store-gc";
 
 #[derive(Debug, Error)]
 pub enum SetupError {
@@ -107,6 +111,11 @@ pub fn kache_config(endpoint: &str, bucket: &str) -> String {
 /// Render the systemd user unit for this binary.
 pub fn render_unit(self_exe: &Path) -> String {
     UNIT_TEMPLATE.replace("{self_exe}", &self_exe.display().to_string())
+}
+
+/// Render the store-gc oneshot service for this binary.
+pub fn render_store_gc_service(self_exe: &Path) -> String {
+    GC_SERVICE_TEMPLATE.replace("{self_exe}", &self_exe.display().to_string())
 }
 
 /// Minimal line diff (LCS), `-`/`+`/` ` prefixed, one line per entry.
@@ -331,13 +340,26 @@ fn setup_kache(runner: &dyn Runner, paths: &Paths, force: bool) -> Result<(), Se
     Ok(())
 }
 
-/// Step 3: systemd user unit + kache daemon.
-fn setup_services(runner: &dyn Runner, paths: &Paths) -> Result<(), SetupError> {
+/// Step 3: systemd user units + kache daemon. The store-gc timer runs only on
+/// node0: that host sees every remote build, so its kache index is the global
+/// usage view, and one GC per store avoids racing evictors.
+fn setup_services(runner: &dyn Runner, paths: &Paths, role: Role) -> Result<(), SetupError> {
     let unit = paths
         .systemd_user_dir()
         .join(format!("{UNIT_NAME}.service"));
     write_file(&unit, &render_unit(&paths.self_exe), None)?;
     info!(path = %unit.display(), "installed systemd user unit");
+    if role == Role::Node0 {
+        let gc_service = paths
+            .systemd_user_dir()
+            .join(format!("{GC_UNIT_NAME}.service"));
+        write_file(&gc_service, &render_store_gc_service(&paths.self_exe), None)?;
+        let gc_timer = paths
+            .systemd_user_dir()
+            .join(format!("{GC_UNIT_NAME}.timer"));
+        write_file(&gc_timer, STORE_GC_TIMER, None)?;
+        info!(service = %gc_service.display(), timer = %gc_timer.display(), "installed store-gc units");
+    }
     run_checked(runner, "systemctl", &["--user", "daemon-reload"])?;
     run_checked(
         runner,
@@ -345,6 +367,11 @@ fn setup_services(runner: &dyn Runner, paths: &Paths) -> Result<(), SetupError> 
         &["--user", "enable", "--now", UNIT_NAME],
     )?;
     info!(unit = UNIT_NAME, "enabled and started");
+    if role == Role::Node0 {
+        let timer = format!("{GC_UNIT_NAME}.timer");
+        run_checked(runner, "systemctl", &["--user", "enable", "--now", &timer])?;
+        info!(unit = timer, "enabled and started");
+    }
 
     let kache = paths.kache_bin();
     let out = runner.run(&kache, &["daemon", "install"])?;
@@ -426,7 +453,7 @@ pub fn setup_with(runner: &dyn Runner, paths: &Paths, opts: &SetupOpts) -> Resul
     info!(role = role_name(opts.role), home = %paths.home.display(), "rbs setup");
     write_config_file(&paths.rbs_config(), &generate_config(opts.role), opts.force)?;
     setup_kache(runner, &paths, opts.force)?;
-    setup_services(runner, &paths)?;
+    setup_services(runner, &paths, opts.role)?;
     setup_shim(&paths)?;
     if let (Role::Laptop, Some(host)) = (opts.role, opts.remote_host.as_deref()) {
         setup_remote(runner, &paths, host, opts.force)?;

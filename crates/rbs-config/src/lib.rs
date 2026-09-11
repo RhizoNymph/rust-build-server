@@ -167,6 +167,27 @@ impl Default for Server {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+pub struct Store {
+    /// Size cap for the shared kache S3 store, in GiB. 0 disables GC.
+    pub max_size_gib: u32,
+    /// GC evicts until usage is at or below this fraction of the cap.
+    pub low_watermark_percent: u8,
+    /// Objects whose S3 last-modified is newer than this are never evicted.
+    pub min_age_hours: u32,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            max_size_gib: 40,
+            low_watermark_percent: 90,
+            min_age_hours: 24,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct Sync {
     pub rsync_path: String,
     pub extra_excludes: Vec<String>,
@@ -190,6 +211,7 @@ pub struct Config {
     pub local_server: LocalServer,
     pub policy: Policy,
     pub server: Server,
+    pub store: Store,
     pub sync: Sync,
 }
 
@@ -305,6 +327,41 @@ mod tests {
         assert_eq!(c.policy.post_build, PostBuild::None);
         assert_eq!(c.policy.priority, Priority::Background);
         assert!("bogus".parse::<Mode>().is_err());
+    }
+
+    #[test]
+    fn store_defaults() {
+        let s = Store::default();
+        assert_eq!(s.max_size_gib, 40);
+        assert_eq!(s.low_watermark_percent, 90);
+        assert_eq!(s.min_age_hours, 24);
+        assert_eq!(Config::default().store, s);
+    }
+
+    #[test]
+    fn store_partial_toml_fills_defaults() {
+        let c =
+            Config::from_toml(Path::new("t.toml"), "[store]\nmax_size_gib = 100\n").expect("parse");
+        assert_eq!(c.store.max_size_gib, 100);
+        assert_eq!(c.store.low_watermark_percent, 90);
+        assert_eq!(c.store.min_age_hours, 24);
+
+        let c = Config::from_toml(
+            Path::new("t.toml"),
+            "[store]\nmax_size_gib = 0\nlow_watermark_percent = 75\nmin_age_hours = 48\n",
+        )
+        .expect("parse");
+        assert_eq!(c.store.max_size_gib, 0);
+        assert_eq!(c.store.low_watermark_percent, 75);
+        assert_eq!(c.store.min_age_hours, 48);
+    }
+
+    #[test]
+    fn store_unknown_keys_are_errors() {
+        let err = Config::from_toml(Path::new("t.toml"), "[store]\nmax_size_gb = 10\n")
+            .expect_err("must fail");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("t.toml"));
     }
 
     #[test]
