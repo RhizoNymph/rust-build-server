@@ -79,7 +79,7 @@ existing scripts keep working; `Role::name()` always returns the new spelling.
   | `toolchain` | `rustc -vV` / `cargo -V` / `rustup show active-toolchain` in `cwd` parse into a fingerprint (detail = fingerprint) |
   | `remote-ssh` (`--remote`) | `ssh -o BatchMode=yes -o ConnectTimeout=3 <host> true` succeeds; detail has the RTT in ms. Failure marks `remote-rbs`/`remote-toolchain` as skipped+failed. |
   | `remote-rbs` | `ssh <host> <remote_bin> --version` succeeds (detail = version); `remote_bin` from `[remote]` (default `.local/bin/rbs`) |
-  | `remote-toolchain` | `ssh <host> 'cd <cwd> && rustc -vV'` parsed with `rbs_toolchain::parse_rustc_vv` is `compatible_with` the local fingerprint; on mismatch detail lists both fingerprints and the `rustup toolchain install` hint |
+  | `remote-toolchain` | `ssh <host> 'cd <cwd> && rustc -vV'` parsed with `rbs_toolchain::parse_rustc_vv` is `compatible_with` the local fingerprint. Contract-aware, like the shim: a mismatch fails only when `<cwd>` has a `rust-toolchain.toml` (a broken contract); in an unpinned directory differing defaults are reported as ok with a note that remote builds from there fall back locally. Detail always lists both fingerprints. |
 
   `<host>` is `cfg.remote.host` from the layered rbs config for `cwd`.
 

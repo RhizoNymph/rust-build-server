@@ -147,15 +147,26 @@ fn remote_checks(
         Ok(remote) if local.compatible_with(&remote) => {
             checks.push(check("remote-toolchain", true, format!("{host}: {remote}")));
         }
-        Ok(remote) => checks.push(check(
-            "remote-toolchain",
-            false,
-            format!(
-                "mismatch for {}\n    local:  {local}\n    {host}: {remote}\n    pin with rust-toolchain.toml and `rustup toolchain install {}` on {host}",
-                cwd.display(),
-                local.rustc_version
-            ),
-        )),
+        // Contract-aware, matching the shim: a mismatch is only a failure when
+        // the directory declares a toolchain, because only then was there a
+        // contract to break. In an unpinned directory the hosts' defaults are
+        // free to differ; remote builds from here simply fall back locally.
+        Ok(remote) => {
+            let pinned = rbs_toolchain::find_toolchain_file(cwd).is_some();
+            let detail = if pinned {
+                format!(
+                    "mismatch for {}\n    local:  {local}\n    {host}: {remote}\n    run `rustup toolchain install {}` on {host}",
+                    cwd.display(),
+                    local.rustc_version
+                )
+            } else {
+                format!(
+                    "defaults differ, but {} is unpinned so nothing is broken\n    local:  {local}\n    {host}: {remote}\n    remote builds from an unpinned directory fall back to a local build; add rust-toolchain.toml to build remotely",
+                    cwd.display()
+                )
+            };
+            checks.push(check("remote-toolchain", !pinned, detail));
+        }
         Err(e) => checks.push(check("remote-toolchain", false, format!("{host}: {e}"))),
     }
 }
