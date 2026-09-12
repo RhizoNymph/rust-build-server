@@ -216,6 +216,13 @@ fn remote_ssh_unreachable_fails_dependent_checks() {
 fn remote_toolchain_mismatch_reports_both_fingerprints() {
     let g = green();
     let cwd = g.th.paths.home.clone();
+    // A pinned directory: the hosts agreed on a toolchain and then diverged,
+    // so this is a broken contract and must fail.
+    std::fs::write(
+        cwd.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
+    )
+    .expect("write rust-toolchain.toml");
     let r = green_runner(&cwd).ok_args("ssh", &["node0", &remote_cmd(&cwd)], VV_B);
     let mut o = local_opts(&g.th);
     o.remote = true;
@@ -225,6 +232,23 @@ fn remote_toolchain_mismatch_reports_both_fingerprints() {
     assert!(c.detail.contains("59807616e"), "{}", c.detail);
     assert!(c.detail.contains("abcdef123"), "{}", c.detail);
     assert!(c.detail.contains("1.96.0"), "{}", c.detail);
+}
+
+#[test]
+fn remote_toolchain_mismatch_in_unpinned_dir_is_not_a_failure() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    // No rust-toolchain.toml: the hosts' defaults may differ freely, and a
+    // remote build from here falls back locally rather than breaking.
+    let r = green_runner(&cwd).ok_args("ssh", &["node0", &remote_cmd(&cwd)], VV_B);
+    let mut o = local_opts(&g.th);
+    o.remote = true;
+    let rep = doctor_with(&r, &g.th.paths, &g.cfg, &o).expect("doctor");
+    let c = check(&rep, "remote-toolchain");
+    assert!(c.ok, "unpinned mismatch must not fail: {}", c.detail);
+    assert!(c.detail.contains("unpinned"), "{}", c.detail);
+    assert!(c.detail.contains("rust-toolchain.toml"), "{}", c.detail);
+    assert!(rep.ok(), "report must be green overall");
 }
 
 #[test]
