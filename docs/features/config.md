@@ -52,10 +52,30 @@ touch_after_hours = 24         # touch throttle window; objects fresher than thi
 [sync]
 rsync_path = "rsync"
 extra_excludes = []
+
+[bootstrap]                    # fleet topology for `rbs bootstrap`
+server = "node0"               # ssh host that runs the build server
+clients = []                   # ssh hosts that submit jobs
+push_secrets = false           # copy ~/.config/rbs/minio.env to hosts over ssh
+toolchain = ""                 # "" = the channel pinned by the workspace's rust-toolchain.toml
+kache_bin = ""                 # "" = ~/.local/bin/kache as the push source
 ```
 
+## `[bootstrap]`
+Describes the topology `rbs bootstrap` provisions: exactly one `server` and N
+`clients` (ssh destinations, resolved by the local ssh config). `--server` /
+`--clients` override the file for one run.
+
+`push_secrets` gates the only path by which MinIO credentials leave this host:
+with the default `false`, bootstrap only checks whether a host already has
+`~/.config/rbs/minio.env` and otherwise prints the `scp` command for the
+operator. `toolchain` pins the channel the whole fleet must have; empty means
+"read `[toolchain] channel` from the workspace's `rust-toolchain.toml` at
+bootstrap time", so the fleet follows the repo's pin. See
+`docs/features/bootstrap.md`.
+
 ## Files
-- `crates/rbs-config/src/lib.rs` — `Config`, `load(cwd) -> Result<Config, ConfigError>`, `Mode`.
+- `crates/rbs-config/src/lib.rs` — `Config`, `load(cwd) -> Result<Config, ConfigError>`, `Mode`, `Bootstrap`.
 - `crates/rbs-config/src/layers.rs` — discovery/merge of the sources above.
 - `crates/rbs-config/src/env.rs` — env overrides + allowlist glob matching (`CARGO_*`).
 

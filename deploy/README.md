@@ -35,12 +35,12 @@ cargo install --path crates/rbs-client --locked    # installs ~/.cargo/bin/rbs
 ## 3. Provision both hosts
 
 ```sh
-rbs setup --role laptop --remote-host node0
+rbs setup --role client --remote-host node0
 ```
 
 This, in order:
 
-1. writes `~/.config/rbs/config.toml` (laptop sizing) if absent — an existing
+1. writes `~/.config/rbs/config.toml` (client sizing) if absent — an existing
    file is diffed, never overwritten, unless you pass `--force`;
 2. writes `~/.config/kache/config.toml` and the `[rbs]` profile in
    `~/.aws/credentials` (mode 600, other profiles untouched), then checks
@@ -49,8 +49,13 @@ This, in order:
    `kache daemon install`;
 4. creates the cargo shim at `~/.local/share/rbs/shim/cargo`;
 5. copies the `rbs` binary to `node0:~/.local/bin/rbs` and runs
-   `rbs setup --role node0` there (node0's config has `[remote] enabled = false`
-   and the larger `[server]` sizing).
+   `rbs setup --role server` there (the server's config has
+   `[remote] enabled = false` and the larger `[server]` sizing).
+
+For a fleet of more than one client, set `[bootstrap] server` / `clients` in
+`~/.config/rbs/config.toml` and run `rbs bootstrap` instead: it does all of the
+above on every host, plus the ssh alias and the pinned toolchain
+(`docs/features/bootstrap.md`).
 
 ## 4. Put the shim on PATH for agents
 
@@ -94,7 +99,7 @@ they agree.
 
 ## Escape hatches
 
-- `RBS_LOCAL=1` or `RBS_MODE=local` — use the laptop's `rbs server` only.
+- `RBS_LOCAL=1` or `RBS_MODE=local` — use the local `rbs server` only.
 - `RBS_MODE=plain` — bypass rbs entirely (plain cargo + local kache).
 - `[policy] local_subcommands` in `~/.config/rbs/config.toml` or a
   project-local `.rbs.toml` — subcommands that always run locally.
@@ -103,7 +108,8 @@ they agree.
 
 ```sh
 cargo install --path crates/rbs-client --locked
-rbs setup --role laptop --remote-host node0   # re-links the shim, re-copies to node0, restarts nothing it doesn't need to
+rbs setup --role client --remote-host node0   # re-links the shim, re-copies to node0, restarts nothing it doesn't need to
+rbs bootstrap                                 # or: roll the new binary out to every host of the fleet
 systemctl --user restart rbs-server           # on each host, to pick up the new server
 ```
 

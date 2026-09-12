@@ -54,6 +54,16 @@ impl FakeRunner {
         self
     }
 
+    /// `program args…` yields exactly `output` (stdout *and* status).
+    pub fn script(mut self, program: &str, args: &[&str], output: Output) -> Self {
+        self.scripts.push(Script {
+            program: program.into(),
+            args: Some(args.iter().map(|s| s.to_string()).collect()),
+            output,
+        });
+        self
+    }
+
     /// `program args…` exits `status` with `stderr`.
     pub fn fail_args(mut self, program: &str, args: &[&str], status: i32, stderr: &str) -> Self {
         self.scripts.push(Script {

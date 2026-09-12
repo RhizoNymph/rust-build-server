@@ -26,6 +26,10 @@ Overview:
       `rbs setup` installs systemd user units (server on both hosts, kache
       daemon), writes kache config for the shared S3 store, and verifies
       everything with `rbs doctor`.
+    bootstrap: >
+      `rbs bootstrap` drives setup across the whole fleet (one server, N
+      clients) over ssh: pushes binaries, ensures the pinned toolchain and the
+      client→server ssh alias, runs setup and doctor per host.
   data_flow: |
     agent ── exec `cargo <args>` ──▶ cargo shim (rbs-client)
       ├─ load Config; honor escape hatches (RBS_MODE=local|plain, RBS_LOCAL=1)
@@ -85,10 +89,18 @@ Features Index:
     depends_on: [proto, config, toolchain, sync, server]
     doc: docs/features/client.md
   setup:
-    description: Install/verify on laptop and node0 (systemd units, kache cfg, doctor).
+    description: Install/verify one host, client or server (systemd units, kache cfg, doctor).
     entry_points: ["rbs setup", "rbs doctor", deploy/]
     depends_on: [config, client]
     doc: docs/features/setup.md
+  bootstrap:
+    description: >
+      Provision or upgrade every host of the fleet (one server, N clients)
+      over ssh with one command: binaries, secrets policy, ssh alias,
+      toolchain, remote setup, remote doctor; per-host report.
+    entry_points: ["rbs bootstrap", crates/rbs-setup/src/bootstrap.rs]
+    depends_on: [config, setup]
+    doc: docs/features/bootstrap.md
   store_gc:
     description: >
       Size cap + LFU eviction for the shared kache S3 store (daily timer on

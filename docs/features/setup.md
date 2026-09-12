@@ -1,17 +1,25 @@
 # setup — install & verify
 
 ## Scope
-One-command provisioning of a host (laptop or node0) and a health check.
-Non-scope: installing rustup/toolchains, running MinIO (documented in
-`deploy/minio.md`), the `rbs` CLI argument parsing (lives in `rbs-client`).
+One-command provisioning of a single host (role `client` or `server`) and a
+health check. Non-scope: installing rustup/toolchains, running MinIO
+(documented in `deploy/minio.md`), the `rbs` CLI argument parsing (lives in
+`rbs-client`), provisioning more than one host at a time — that is
+`rbs bootstrap`, see `docs/features/bootstrap.md`, which runs this command
+remotely on every host of the fleet.
+
+Roles describe topology, not hardware: one `server` runs the build server, N
+`client`s submit jobs to it. The former names are accepted as aliases —
+`--role laptop` == `--role client`, `--role node0` == `--role server` — so
+existing scripts keep working; `Role::name()` always returns the new spelling.
 
 ## Commands
-- `rbs setup [--role laptop|node0] [--remote-host node0] [--force]` → `rbs_setup::setup(SetupOpts)`
+- `rbs setup [--role client|server] [--remote-host H] [--force]` → `rbs_setup::setup(SetupOpts)`
   1. Write `~/.config/rbs/config.toml` if absent. Generated from
      `rbs_config::Config::default()` via `toml::to_string_pretty` with
-     role-specific `[server]` sizing — node0: `reserve_cores=4, max_jobs=12,
+     role-specific `[server]` sizing — server: `reserve_cores=4, max_jobs=12,
      job_mem_max_gib=24, min_mem_available_gib=16` plus `[remote] enabled=false`;
-     laptop: `reserve_cores=4, max_jobs=3, job_mem_max_gib=12,
+     client: `reserve_cores=4, max_jobs=3, job_mem_max_gib=12,
      min_mem_available_gib=8`. If the file exists and differs, a line diff is
      printed and the file is kept (setup continues) unless `--force`.
   2. Read `~/.config/rbs/minio.env` (`KACHE_S3_ACCESS_KEY`, `KACHE_S3_SECRET_KEY`
@@ -34,22 +42,23 @@ Non-scope: installing rustup/toolchains, running MinIO (documented in
      TOML), else `SetupError::KacheRemoteNotConfigured`.
   3. Write `~/.config/systemd/user/rbs-server.service` from
      `deploy/systemd/rbs-server.service` (`include_str!`, `{self_exe}`
-     substituted). Role node0 only: also write `rbs-store-gc.service`
+     substituted). Role server only: also write `rbs-store-gc.service`
      (oneshot, `ExecStart={self_exe} store-gc`) and `rbs-store-gc.timer`
      (daily, `RandomizedDelaySec=1h`, `Persistent=true`) from
      `deploy/systemd/`. Then `systemctl --user daemon-reload`, `systemctl
-     --user enable --now rbs-server` (node0 additionally `enable --now
+     --user enable --now rbs-server` (the server additionally `enable --now
      rbs-store-gc.timer`), then `kache daemon install` (a failure mentioning
-     "already" is ignored). The laptop role never installs the GC units:
-     only node0's kache index has the global hit-count view, and one evictor
-     per store avoids races.
+     "already" is ignored). The client role never installs the GC units:
+     only the server's kache index has the global hit-count view, and one
+     evictor per store avoids races.
   4. `~/.local/share/rbs/shim/cargo` → hardlink to `self_exe`, symlink
      fallback; an existing link is replaced. Prints
      `export PATH="$HOME/.local/share/rbs/shim:$PATH"`.
-  5. Laptop role with `--remote-host H`: `ssh H mkdir -p .local/bin`,
-     `scp <self_exe> H:.local/bin/rbs`, `ssh H .local/bin/rbs setup --role node0
-     [--force]`; the remote's stdout is echoed. Node0 role ignores
-     `--remote-host` with a warning (no recursion).
+  5. Client role with `--remote-host H`: `ssh H mkdir -p .local/bin`,
+     `scp <self_exe> H:.local/bin/rbs`, `ssh H .local/bin/rbs setup --role server
+     [--force]`; the remote's stdout is echoed. The server role ignores
+     `--remote-host` with a warning (no recursion). For more than one client,
+     use `rbs bootstrap` instead of repeating this by hand.
 - `rbs doctor [--remote]` → `rbs_setup::doctor(DoctorOpts{cwd, remote}) -> DoctorReport`.
   Each check is a `Check{name, ok, detail}`; `DoctorReport::ok()` is the AND.
   A command that fails or cannot be spawned is a failed check with its stderr
@@ -84,7 +93,8 @@ test spawns a process, reads the real `$HOME`, or touches the network.
 
 ## Files
 - `crates/rbs-setup/src/lib.rs` — public API: `Role`, `SetupOpts`, `DoctorOpts`,
-  `Check`, `DoctorReport`, `setup`, `doctor`; re-exports `setup_with`,
+  `Check`, `DoctorReport`, `BootstrapReport`, `setup`, `doctor`, `bootstrap`
+  (see `docs/features/bootstrap.md`); re-exports `setup_with`,
   `doctor_with`, `Paths`, `Runner`, `SystemRunner`, `Output`, `RunnerError`,
   `SetupError`, `generate_config`, `render_unit`, `render_store_gc_service`,
   `STORE_GC_TIMER`, `REQUIRED_BINARIES`, `KACHE_CONFIG_DEFAULT`.
@@ -96,11 +106,11 @@ test spawns a process, reads the real `$HOME`, or touches the network.
   `kache_config`, `render_unit`, `line_diff`, `aws_credentials_with_profile`.
 - `crates/rbs-setup/src/doctor.rs` — check table above.
 - `crates/rbs-setup/src/testing.rs` (cfg(test)) — `FakeRunner`, `TempHome`.
-- `crates/rbs-setup/src/{setup_tests,doctor_tests}.rs` — 31 tests.
+- `crates/rbs-setup/src/{setup_tests,doctor_tests}.rs` — 34 tests.
 - `deploy/systemd/rbs-server.service` — unit template (`ExecStart={self_exe} server`,
   `Restart=on-failure`, `Environment=RBS_LOG=info`, `WantedBy=default.target`).
 - `deploy/systemd/rbs-store-gc.service`, `deploy/systemd/rbs-store-gc.timer` —
-  node0-only store GC units (see `docs/features/store-gc.md`); rendered via
+  server-only store GC units (see `docs/features/store-gc.md`); rendered via
   `render_store_gc_service` / `STORE_GC_TIMER`.
 - `deploy/minio.md` — the `rbs-minio` container and bucket; `deploy/README.md` —
   laptop + node0 bring-up, toolchain pinning, PATH line for agents.

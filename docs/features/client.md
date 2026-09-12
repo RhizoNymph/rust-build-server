@@ -11,7 +11,8 @@ as `cargo` (shim) or `rbs` (CLI). Non-scope: scheduling (server), config schema
 - `rbs exec [--mode auto|remote|local|plain] -- <cmd…>` — run an arbitrary command through the chain (cargo policy — `local_subcommands`, post-build — is *not* applied).
 - `rbs server [--socket P] [--tokens N]` → `rbs_server::run_server(cfg, ServerOpts)`.
 - `rbs proxy [--socket P]` → `rbs_server::run_proxy(socket)` (default `cfg.local_server.socket`).
-- `rbs setup [--role laptop|node0] [--remote-host H] [--force]` → `rbs_setup::setup` with `self_exe = current_exe()`.
+- `rbs setup [--role client|server] [--remote-host H] [--force]` → `rbs_setup::setup` with `self_exe = current_exe()` (`laptop`/`node0` still parse as `client`/`server`).
+- `rbs bootstrap [--server H] [--clients a,b] [--dry-run] [--force]` → `rbs_setup::bootstrap` with `workspace = cwd`; prints the per-host table from `rbs_setup::render_report`, exit 1 if `!report.ok()`.
 - `rbs doctor [--remote]` → `rbs_setup::doctor`, prints `ok  /FAIL name detail` rows, exit 1 if `!report.ok()`.
 
 Logging: `tracing-subscriber` to stderr, filter from `RBS_LOG` (default `warn`),

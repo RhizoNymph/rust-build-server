@@ -46,10 +46,26 @@ enum Cmd {
     },
     /// Install systemd units, kache config and the cargo shim.
     Setup {
-        #[arg(long, default_value = "laptop", value_parser = parse_role)]
+        /// `client` or `server` (`laptop` / `node0` are legacy aliases).
+        #[arg(long, default_value = "client", value_parser = parse_role)]
         role: rbs_setup::Role,
         #[arg(long)]
         remote_host: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Provision or upgrade every host of the fleet over ssh.
+    Bootstrap {
+        /// ssh host that runs the build server (overrides `[bootstrap] server`).
+        #[arg(long)]
+        server: Option<String>,
+        /// Comma-separated ssh hosts that submit jobs (overrides `[bootstrap] clients`).
+        #[arg(long, value_delimiter = ',')]
+        clients: Vec<String>,
+        /// Print the planned actions per host and execute nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Pass `--force` to the remote `rbs setup`.
         #[arg(long)]
         force: bool,
     },
@@ -296,6 +312,23 @@ async fn cli_main() -> anyhow::Result<i32> {
                 self_exe: current_exe()?,
             })?;
             Ok(0)
+        }
+        Cmd::Bootstrap {
+            server,
+            clients,
+            dry_run,
+            force,
+        } => {
+            let report = rbs_setup::bootstrap(rbs_setup::BootstrapOpts {
+                server,
+                clients,
+                dry_run,
+                force,
+                self_exe: current_exe()?,
+                workspace: cwd,
+            })?;
+            print!("{}", rbs_setup::render_report(&report));
+            Ok(if report.ok() { 0 } else { 1 })
         }
         Cmd::Doctor { remote } => {
             let report = rbs_setup::doctor(rbs_setup::DoctorOpts { cwd, remote })?;

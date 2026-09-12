@@ -212,6 +212,36 @@ impl Default for Sync {
     }
 }
 
+/// Fleet topology for `rbs bootstrap`: one server host and N client hosts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Bootstrap {
+    /// ssh host that runs the build server.
+    pub server: String,
+    /// ssh hosts that submit jobs to the server.
+    pub clients: Vec<String>,
+    /// Copy `~/.config/rbs/minio.env` to the hosts over ssh. Off by default:
+    /// credentials only travel when the operator asks for it explicitly.
+    pub push_secrets: bool,
+    /// Toolchain channel to ensure on every host. Empty = read the pinned
+    /// channel from the workspace's `rust-toolchain.toml` at bootstrap time.
+    pub toolchain: String,
+    /// Local `kache` binary to push. Empty = `~/.local/bin/kache`.
+    pub kache_bin: String,
+}
+
+impl Default for Bootstrap {
+    fn default() -> Self {
+        Self {
+            server: "node0".into(),
+            clients: Vec::new(),
+            push_secrets: false,
+            toolchain: String::new(),
+            kache_bin: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -221,6 +251,7 @@ pub struct Config {
     pub server: Server,
     pub store: Store,
     pub sync: Sync,
+    pub bootstrap: Bootstrap,
 }
 
 impl Config {
@@ -385,6 +416,49 @@ mod tests {
     #[test]
     fn store_unknown_keys_are_errors() {
         let err = Config::from_toml(Path::new("t.toml"), "[store]\nmax_size_gb = 10\n")
+            .expect_err("must fail");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("t.toml"));
+    }
+
+    #[test]
+    fn bootstrap_defaults() {
+        let b = Bootstrap::default();
+        assert_eq!(b.server, "node0");
+        assert!(b.clients.is_empty());
+        assert!(!b.push_secrets, "secrets never leave the host by default");
+        assert_eq!(b.toolchain, "");
+        assert_eq!(b.kache_bin, "");
+        assert_eq!(Config::default().bootstrap, b);
+    }
+
+    #[test]
+    fn bootstrap_parses_and_fills_defaults() {
+        let c = Config::from_toml(
+            Path::new("t.toml"),
+            "[bootstrap]\nserver = \"big\"\nclients = [\"a\", \"b\"]\npush_secrets = true\n",
+        )
+        .expect("parse");
+        assert_eq!(c.bootstrap.server, "big");
+        assert_eq!(c.bootstrap.clients, vec!["a", "b"]);
+        assert!(c.bootstrap.push_secrets);
+        assert_eq!(c.bootstrap.toolchain, "");
+        assert_eq!(c.bootstrap.kache_bin, "");
+
+        let c = Config::from_toml(
+            Path::new("t.toml"),
+            "[bootstrap]\ntoolchain = \"1.95.0\"\nkache_bin = \"/opt/kache\"\n",
+        )
+        .expect("parse");
+        assert_eq!(c.bootstrap.toolchain, "1.95.0");
+        assert_eq!(c.bootstrap.kache_bin, "/opt/kache");
+        assert_eq!(c.bootstrap.server, "node0");
+        assert!(!c.bootstrap.push_secrets);
+    }
+
+    #[test]
+    fn bootstrap_unknown_keys_are_errors() {
+        let err = Config::from_toml(Path::new("t.toml"), "[bootstrap]\nclient = [\"a\"]\n")
             .expect_err("must fail");
         assert!(matches!(err, ConfigError::Parse { .. }));
         assert!(err.to_string().contains("t.toml"));

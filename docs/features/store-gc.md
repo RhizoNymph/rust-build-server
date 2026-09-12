@@ -95,9 +95,9 @@ rbs store-touch [--workspace <dir>] [--force]  (CLI + shim post-build trigger)
         ├─ touch::execute_touch(store, plan.touch)  (copy·copy·delete, ≤8 concurrent)
         └─ touch::write_stamp(stamp)  (only when failures == 0)
 ```
-Scheduling: `rbs setup --role node0` installs `rbs-store-gc.service`
+Scheduling: `rbs setup --role server` installs `rbs-store-gc.service`
 (oneshot) + `rbs-store-gc.timer` (daily, 1h random delay, persistent) as
-systemd user units and enables the timer. The laptop role installs neither.
+systemd user units and enables the timer. The client role installs neither.
 
 ## Files
 - `crates/rbs-store/src/lib.rs` — `GcOpts`, `GcReport`, `TouchOpts`,
@@ -123,7 +123,7 @@ systemd user units and enables the timer. The laptop role installs neither.
   dispatch; `RealHooks::spawn_touch` (detached spawn).
 - `crates/rbs-client/src/shim.rs` — `COMPILING_SUBCOMMANDS`, `wants_touch`,
   the post-build / pre-exec trigger (docs/features/client.md).
-- `crates/rbs-setup/src/setup.rs` — node0-only unit install
+- `crates/rbs-setup/src/setup.rs` — server-only unit install
   (`render_store_gc_service`, `STORE_GC_TIMER`).
 - `deploy/systemd/rbs-store-gc.service`, `deploy/systemd/rbs-store-gc.timer` —
   unit templates (`{self_exe}` substituted in the service).
