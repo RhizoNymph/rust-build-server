@@ -59,6 +59,7 @@ clients = []                   # ssh hosts that submit jobs
 push_secrets = false           # copy ~/.config/rbs/minio.env to hosts over ssh
 toolchain = ""                 # "" = the channel pinned by the workspace's rust-toolchain.toml
 kache_bin = ""                 # "" = ~/.local/bin/kache as the push source
+shim_on_path = true            # append the shim `export PATH=…` block to each host's shell profile
 ```
 
 ## `[bootstrap]`
@@ -71,7 +72,14 @@ with the default `false`, bootstrap only checks whether a host already has
 `~/.config/rbs/minio.env` and otherwise prints the `scp` command for the
 operator. `toolchain` pins the channel the whole fleet must have; empty means
 "read `[toolchain] channel` from the workspace's `rust-toolchain.toml` at
-bootstrap time", so the fleet follows the repo's pin. See
+bootstrap time", so the fleet follows the repo's pin.
+
+`shim_on_path` (default `true`) lets bootstrap append a marked block —
+`# >>> rbs shim >>>` / `export PATH="$HOME/.local/share/rbs/shim:$PATH"` /
+`# <<< rbs shim <<<` — to each host's `~/.bash_profile` (when it exists) or
+`~/.profile`. Without it a bootstrapped host has the shim installed but never on
+PATH, so its `cargo` bypasses rbs entirely; set it to `false` to manage the PATH
+line yourself and bootstrap will only print the line it would have added. See
 `docs/features/bootstrap.md`.
 
 ## Files

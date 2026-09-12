@@ -59,8 +59,14 @@ above on every host, plus the ssh alias and the pinned toolchain
 
 ## 4. Put the shim on PATH for agents
 
-Agents must see the shim **before** `~/.cargo/bin`. Add this to whatever
-environment launches them (shell rc, the agent's env file, a wrapper script):
+`rbs bootstrap` already does this: its `shim-path` step appends a marked block
+with the line below to each host's `~/.bash_profile` (or `~/.profile`), so a
+bootstrapped host actually routes `cargo` through rbs. Opt out with
+`[bootstrap] shim_on_path = false`.
+
+After a bare `rbs setup`, add it by hand — agents must see the shim **before**
+`~/.cargo/bin`, so put this in whatever environment launches them (shell rc, the
+agent's env file, a wrapper script):
 
 ```sh
 export PATH="$HOME/.local/share/rbs/shim:$PATH"

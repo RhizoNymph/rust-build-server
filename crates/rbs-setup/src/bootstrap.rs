@@ -26,13 +26,24 @@ const REMOTE_KACHE: &str = ".local/bin/kache";
 const REMOTE_MINIO_ENV: &str = ".config/rbs/minio.env";
 const CONNECT_TIMEOUT_SECS: u32 = 5;
 
+/// Shell profile sourced by a login shell. `~/.bash_profile` wins when it
+/// exists: bash reads it *instead of* `~/.profile`.
+const REMOTE_PROFILE: &str = ".profile";
+const REMOTE_BASH_PROFILE: &str = ".bash_profile";
+/// Marked block appended to the profile, so reruns are no-ops and a future
+/// edit (or removal) is one `grep` away.
+const SHIM_MARKER_BEGIN: &str = "# >>> rbs shim >>>";
+const SHIM_MARKER_END: &str = "# <<< rbs shim <<<";
+const SHIM_EXPORT: &str = r#"export PATH="$HOME/.local/share/rbs/shim:$PATH""#;
+
 /// Ordered step list; also the column order of the report table.
-pub const STEPS: [&str; 7] = [
+pub const STEPS: [&str; 8] = [
     "reach",
     "binaries",
     "secrets",
     "ssh-alias",
     "toolchain",
+    "shim-path",
     "setup",
     "doctor",
 ];
@@ -212,6 +223,30 @@ pub fn toolchain_installed(list: &str, channel: &str) -> bool {
         .any(|name| name == channel || name.starts_with(&prefix))
 }
 
+/// Quote `s` so a POSIX shell reproduces it as exactly one word. Single quotes
+/// make everything literal; an embedded `'` closes the string, adds an escaped
+/// quote and reopens it (`'\''`).
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// argv for running `cmd` on `host` through a **login** shell.
+///
+/// `ssh host a b c` does not preserve argv: ssh joins the words with spaces and
+/// the remote shell re-parses the result, so `cmd` has to arrive as one quoted
+/// word. Without `bash -lc` the remote shell is non-interactive and sources no
+/// profile, leaving `$PATH` without `~/.local/bin` and `~/.cargo/bin` — which
+/// made `rustup` and every `binary:*` doctor check fail on hosts where those
+/// binaries were installed and working.
+pub fn login_shell_args(host: &str, cmd: &str) -> Vec<String> {
+    vec![
+        host.to_string(),
+        "bash".to_string(),
+        "-lc".to_string(),
+        shell_quote(cmd),
+    ]
+}
+
 /// Names of the failing checks in `rbs doctor` output.
 pub fn doctor_failed_checks(stdout: &str) -> Vec<String> {
     stdout
@@ -232,6 +267,23 @@ fn exec(runner: &dyn Runner, program: &str, args: &[&str]) -> Result<Output, Str
 /// Run a command and require success, returning its stdout.
 fn run_ok(runner: &dyn Runner, program: &str, args: &[&str]) -> Result<String, String> {
     let out = exec(runner, program, args)?;
+    if out.success() {
+        Ok(out.stdout)
+    } else {
+        Err(out.failure_detail())
+    }
+}
+
+/// Run `cmd` on `host` through a login shell (see [`login_shell_args`]).
+fn login_exec(runner: &dyn Runner, host: &str, cmd: &str) -> Result<Output, String> {
+    let args = login_shell_args(host, cmd);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    exec(runner, "ssh", &argv)
+}
+
+/// [`login_exec`] plus a success requirement, returning stdout.
+fn login_run_ok(runner: &dyn Runner, host: &str, cmd: &str) -> Result<String, String> {
+    let out = login_exec(runner, host, cmd)?;
     if out.success() {
         Ok(out.stdout)
     } else {
@@ -271,6 +323,9 @@ impl Fleet<'_> {
         self.secrets(host, &mut rep);
         self.ssh_alias(host, role, &mut rep);
         self.toolchain(host, &mut rep);
+        // Before setup/doctor on purpose: the login shells those two steps open
+        // are started after the append, so this run's doctor sees the new PATH.
+        self.shim_path(host, &mut rep);
         self.setup(host, role, &mut rep);
         self.doctor(host, role, &mut rep);
         rep
@@ -458,7 +513,9 @@ impl Fleet<'_> {
                 return;
             }
         };
-        let list = match run_ok(self.runner, "ssh", &[host, "rustup toolchain list"]) {
+        // Login shell: rustup usually lives in `~/.cargo/bin`, which only a
+        // profile-sourcing shell has on PATH.
+        let list = match login_run_ok(self.runner, host, "rustup toolchain list") {
             Ok(list) => list,
             Err(e) => {
                 rep.note(format!(
@@ -477,7 +534,7 @@ impl Fleet<'_> {
             return;
         }
         let install = format!("rustup toolchain install {channel} --profile minimal");
-        match run_ok(self.runner, "ssh", &[host, &install]) {
+        match login_run_ok(self.runner, host, &install) {
             Ok(_) => {
                 info!(host, channel, "installed toolchain");
                 rep.step("toolchain", StepStatus::Ok, format!("installed {channel}"));
@@ -486,14 +543,61 @@ impl Fleet<'_> {
         }
     }
 
-    /// Step 6. `rbs setup` by explicit path: a non-interactive ssh PATH has no
-    /// `~/.local/bin`.
-    fn setup(&self, host: &str, role: Role, rep: &mut HostReport) {
-        let mut args = vec![host, REMOTE_RBS, "setup", "--role", role.name()];
-        if self.opts.force {
-            args.push("--force");
+    /// Step 6. A host with the shim installed but not on PATH runs plain cargo
+    /// and never reaches rbs at all, and its `shim-precedence` doctor check can
+    /// never pass. The block is marked so a rerun is a no-op.
+    fn shim_path(&self, host: &str, rep: &mut HostReport) {
+        if !self.cfg.bootstrap.shim_on_path {
+            rep.note(format!(
+                "{host} has the rbs shim but nothing puts it on PATH (`[bootstrap] shim_on_path = false`); add this line to its shell profile by hand or cargo there bypasses rbs: {SHIM_EXPORT}"
+            ));
+            rep.step(
+                "shim-path",
+                StepStatus::Skipped,
+                "shim_on_path = false (manual line in the note)",
+            );
+            return;
         }
-        match exec(self.runner, "ssh", &args) {
+        // bash reads ~/.bash_profile *instead of* ~/.profile when it exists, so
+        // appending to ~/.profile there would be silently ignored.
+        let file = match run_ok(
+            self.runner,
+            "ssh",
+            &[host, &format!("test -f {REMOTE_BASH_PROFILE}")],
+        ) {
+            Ok(_) => REMOTE_BASH_PROFILE,
+            Err(_) => REMOTE_PROFILE,
+        };
+        let probe = format!("grep -q '{SHIM_MARKER_BEGIN}' {file}");
+        if run_ok(self.runner, "ssh", &[host, &probe]).is_ok() {
+            rep.step(
+                "shim-path",
+                StepStatus::Ok,
+                format!("already present in ~/{file}"),
+            );
+            return;
+        }
+        // Same flat quoting as the ssh-alias append: one ssh, no heredoc. The
+        // export line stays single-quoted so `$HOME` reaches the file unexpanded.
+        let append = format!(
+            "printf '%s\\n' '{SHIM_MARKER_BEGIN}' '{SHIM_EXPORT}' '{SHIM_MARKER_END}' >> {file}"
+        );
+        match run_ok(self.runner, "ssh", &[host, &append]) {
+            Ok(_) => {
+                info!(host, file, "added the shim block to the shell profile");
+                rep.step("shim-path", StepStatus::Ok, format!("added to ~/{file}"));
+            }
+            Err(e) => rep.step("shim-path", StepStatus::Failed, format!("{append}: {e}")),
+        }
+    }
+
+    /// Step 7. `rbs setup` by explicit path — belt and braces, so it works even
+    /// if the login PATH is odd — but through a login shell, because setup runs
+    /// `kache` and `systemctl --user` and needs the user's real environment.
+    fn setup(&self, host: &str, role: Role, rep: &mut HostReport) {
+        let force = if self.opts.force { " --force" } else { "" };
+        let cmd = format!("{REMOTE_RBS} setup --role {}{force}", role.name());
+        match login_exec(self.runner, host, &cmd) {
             Ok(out) if out.success() => {
                 debug!(host, stdout = %out.stdout.trim(), "remote setup output");
                 rep.step(
@@ -507,13 +611,17 @@ impl Fleet<'_> {
         }
     }
 
-    /// Step 7. Clients also verify their link to the server (`--remote`).
+    /// Step 8. Clients also verify their link to the server (`--remote`).
+    /// Login shell: doctor's whole job is to report what a user's PATH gives it,
+    /// so running it with sshd's bare PATH reports failures that do not exist.
     fn doctor(&self, host: &str, role: Role, rep: &mut HostReport) {
-        let mut args = vec![host, REMOTE_RBS, "doctor"];
-        if role == Role::Client {
-            args.push("--remote");
-        }
-        match exec(self.runner, "ssh", &args) {
+        let remote = if role == Role::Client {
+            " --remote"
+        } else {
+            ""
+        };
+        let cmd = format!("{REMOTE_RBS} doctor{remote}");
+        match login_exec(self.runner, host, &cmd) {
             Ok(out) if out.success() => {
                 rep.step("doctor", StepStatus::Ok, "all checks passed");
             }
@@ -581,13 +689,26 @@ impl Fleet<'_> {
                 },
             ),
             (
+                "shim-path",
+                if self.cfg.bootstrap.shim_on_path {
+                    format!(
+                        "ensure the `{SHIM_MARKER_BEGIN}` block in {host}:~/.bash_profile or ~/.profile"
+                    )
+                } else {
+                    "not applicable (shim_on_path = false)".to_string()
+                },
+            ),
+            (
                 "setup",
                 format!(
-                    "ssh {host} {REMOTE_RBS} setup --role {}{force}",
+                    "ssh {host} bash -lc '{REMOTE_RBS} setup --role {}{force}'",
                     role.name()
                 ),
             ),
-            ("doctor", format!("ssh {host} {REMOTE_RBS} doctor{remote}")),
+            (
+                "doctor",
+                format!("ssh {host} bash -lc '{REMOTE_RBS} doctor{remote}'"),
+            ),
         ]
     }
 

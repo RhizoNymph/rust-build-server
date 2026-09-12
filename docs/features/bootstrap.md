@@ -29,9 +29,33 @@ Each step records `ok` / `skip` / `FAIL` plus a detail string; `skip` means
 | 2 | `binaries` | `ssh <host> mkdir -p .local/bin`, then for `rbs` and `kache`: `scp <src> <host>:<dest>.new` + `ssh <host> mv -f <dest>.new <dest>` | missing **local** kache binary → note + continue (`rbs` still pushed); a failed push is a FAIL |
 | 3 | `secrets` | `push_secrets = true`: `ssh <host> mkdir -p .config/rbs`, `scp ~/.config/rbs/minio.env <host>:.config/rbs/minio.env`, `ssh <host> chmod 600 …`. `false`: `ssh <host> test -f .config/rbs/minio.env` | `false` + absent on host → note with the exact `scp` command + skip; no local file → note + skip |
 | 4 | `ssh-alias` | clients only: `ssh <client> "test -f .ssh/config && grep -q 'Host <server>' .ssh/config"`; if absent, append a block via `ssh <client> "mkdir -p .ssh && chmod 700 .ssh && printf '%s\n' 'Host <server>' '  HostName <ip>' '  StrictHostKeyChecking accept-new' >> .ssh/config"` | server role → skip; alias present → skip; no `HostName` for the server in the **local** `~/.ssh/config` → note + skip |
-| 5 | `toolchain` | `ssh <host> "rustup toolchain list"`; when the wanted channel is absent, `ssh <host> "rustup toolchain install <ch> --profile minimal"` | channel unknown → note + skip; rustup unusable on the host → note carrying the rustup.rs one-liner + skip |
-| 6 | `setup` | `ssh <host> .local/bin/rbs setup --role server\|client [--force]` | non-zero exit → FAIL with the captured output |
-| 7 | `doctor` | `ssh <host> .local/bin/rbs doctor` (server) / `… doctor --remote` (clients, so their link to the server is checked too) | non-zero exit → FAIL listing the failing check names |
+| 5 | `toolchain` | **login shell**: `rustup toolchain list`; when the wanted channel is absent, `rustup toolchain install <ch> --profile minimal` | channel unknown → note + skip; rustup unusable on the host → note carrying the rustup.rs one-liner + skip |
+| 6 | `shim-path` | `ssh <host> test -f .bash_profile` picks the target file, then `ssh <host> "grep -q '# >>> rbs shim >>>' <file>"`; when absent, append the marked block with `printf '%s\n' … >> <file>` | `shim_on_path = false` → skip + note carrying the manual line; already marked → `ok` ("already present") |
+| 7 | `setup` | **login shell**: `.local/bin/rbs setup --role server\|client [--force]` | non-zero exit → FAIL with the captured output |
+| 8 | `doctor` | **login shell**: `.local/bin/rbs doctor` (server) / `… doctor --remote` (clients, so their link to the server is checked too) | non-zero exit → FAIL listing the failing check names |
+
+## Why the login shell (steps 5, 7, 8)
+`ssh <host> <cmd>` runs a **non-interactive** shell, which sources no profile.
+Its `$PATH` is sshd's default — `/usr/local/sbin:/usr/local/bin:/usr/sbin:
+/usr/bin:/sbin:/bin:…` — with neither `~/.local/bin` nor `~/.cargo/bin` on it.
+Observed against the real fleet: the remote `doctor` reported `binary:rbs`,
+`binary:kache`, `binary:cargo`, `binary:rustup`, `toolchain` and
+`remote-toolchain` as failures on every host although all of those binaries were
+installed and working, and a host with rustup in `~/.cargo/bin` produced a bogus
+"rustup is not usable" note. The steps whose *outcome is a statement about the
+user's PATH* must therefore see the user's PATH, so they run as
+`ssh <host> bash -lc '<cmd>'` (`login_shell_args`).
+
+ssh does not preserve argv — it joins its words with spaces and the remote shell
+re-parses the result — so `<cmd>` is passed as one shell-quoted word
+(`shell_quote`: single quotes, with `'` written as `'\''`).
+
+Steps that must **not** depend on profile state stay unwrapped: the reachability
+probe (`true`), `mkdir -p`, `scp`, `mv -f`, `chmod`, the `test -f` secret check,
+the ssh-config alias append, and every `shim-path` command (`test`, `grep`,
+`printf` are all on sshd's default PATH). `rbs` and `kache` are still invoked by
+explicit `.local/bin/…` path even inside the login shell — belt and braces, so a
+host with an odd profile still gets provisioned.
 
 The wanted toolchain channel is `[bootstrap] toolchain` when set, else
 `[toolchain] channel` of the nearest `rust-toolchain.toml` at or above the
@@ -43,9 +67,9 @@ even the reachability probe.
 
 ## Output
 ```
-HOST  ROLE    reach  binaries  secrets  ssh-alias  toolchain  setup  doctor
-node0 server  ok     ok        skip     skip       skip       ok     ok
-lap   client  ok     ok        skip     ok         ok         ok     FAIL
+HOST  ROLE    reach  binaries  secrets  ssh-alias  toolchain  shim-path  setup  doctor
+node0 server  ok     ok        skip     skip       skip       ok         ok     ok
+lap   client  ok     ok        skip     ok         ok         ok         ok     FAIL
 
 failures:
   lap doctor: failed checks: kache-daemon
@@ -55,6 +79,36 @@ notes:
 
 2 hosts: 1 ok, 1 failed
 ```
+
+## Shim on PATH (`shim-path`)
+`setup` installs `~/.local/share/rbs/shim/cargo` but only *prints* the line that
+puts it on PATH, so a freshly bootstrapped host had the shim and never used it:
+every `cargo` there bypassed rbs, and `doctor` reported `shim-precedence` as
+failed forever. `bootstrap` closes that gap by appending a marked block to the
+host's shell profile:
+
+```
+# >>> rbs shim >>>
+export PATH="$HOME/.local/share/rbs/shim:$PATH"
+# <<< rbs shim <<<
+```
+
+- **Target file**: `~/.profile` (login shells of both bash and sh source it),
+  except when `~/.bash_profile` exists — bash reads that *instead of*
+  `~/.profile`, so appending to `~/.profile` would be silently ignored. The
+  choice is made with `ssh <host> test -f .bash_profile`.
+- **Idempotent**: the begin marker is grepped first and the block appended only
+  when absent, so a rerun is a no-op and the block stays greppable for later
+  edits or removal. Detail is `added to ~/<file>` / `already present in ~/<file>`.
+- **Ordered before `setup`/`doctor`** on purpose: those two open *new* login
+  shells, so the same run's `doctor` already sees the new PATH and can pass
+  `shim-precedence`.
+- **Applies to clients and the server.** The server runs agent builds too, and
+  routing its `cargo` through rbs there is exactly as wanted as on a client; the
+  shim is a no-op for anything that does not build. A single fleet-wide rule also
+  keeps `shim-precedence` meaningful on every host of the report.
+- `[bootstrap] shim_on_path = false` opts out: the step is `skip` and the note
+  carries the exact line to add by hand.
 
 ## Secret handling
 - `[bootstrap] push_secrets` defaults to **false**. MinIO credentials
@@ -89,10 +143,11 @@ no test spawns a process or touches the network.
   `Step`, `StepStatus`, `HostReport`, `STEPS`, `bootstrap_with`,
   `render_report`, and the pure helpers `plan_hosts`, `ssh_config_hostname`,
   `parse_toolchain_channel`, `find_toolchain_file`, `toolchain_installed`,
-  `doctor_failed_checks`.
+  `doctor_failed_checks`, `shell_quote`, `login_shell_args`.
 - `crates/rbs-setup/src/lib.rs` — `BootstrapReport` (+ `ok()`), `bootstrap`.
-- `crates/rbs-setup/src/bootstrap_tests.rs` — 30 tests (argv assertions per
-  step, fleet behaviour, the pure parsers).
+- `crates/rbs-setup/src/bootstrap_tests.rs` — 40 tests (argv assertions per
+  step incl. what is and is not login-shell wrapped, `shim-path` idempotency and
+  target-file choice, fleet behaviour, the pure parsers).
 - `crates/rbs-config/src/lib.rs` — the `[bootstrap]` schema (`Bootstrap`).
 - `crates/rbs-client/src/main.rs` — `Cmd::Bootstrap` → `rbs_setup::bootstrap`,
   prints `render_report`, exits 1 when `!report.ok()`.
@@ -108,7 +163,12 @@ no test spawns a process or touches the network.
 - A note is for something the operator must do by hand; it never implies the
   step succeeded, and it never carries a secret.
 - `rbs`/`kache` on a host always live at `.local/bin/…` and are invoked by
-  explicit path: a non-interactive ssh PATH has no `~/.local/bin`.
+  explicit path even inside the login shell: the login PATH may be odd, and
+  provisioning must not depend on it.
+- A step whose result is a claim about the user's PATH runs under `bash -lc`;
+  a step that must work regardless of profile state never does.
+- `shim-path` only ever *appends* its marked block, never rewrites or reorders
+  the host's profile, and never touches a file that already carries the marker.
 - The fleet shares one toolchain channel; `bootstrap` only ever *adds* a
   toolchain to a host, never switches its default or removes one.
 - `BootstrapReport::ok()` is the AND over hosts; a host is ok when no attempted

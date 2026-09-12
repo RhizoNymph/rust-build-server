@@ -22,8 +22,8 @@ use std::path::PathBuf;
 
 pub use bootstrap::{
     BootstrapError, BootstrapOpts, HostReport, STEPS, Step, StepStatus, bootstrap_with,
-    doctor_failed_checks, find_toolchain_file, parse_toolchain_channel, plan_hosts, render_report,
-    ssh_config_hostname, toolchain_installed,
+    doctor_failed_checks, find_toolchain_file, login_shell_args, parse_toolchain_channel,
+    plan_hosts, render_report, shell_quote, ssh_config_hostname, toolchain_installed,
 };
 pub use doctor::{REQUIRED_BINARIES, doctor_with};
 pub use paths::{Paths, PathsError};

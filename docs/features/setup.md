@@ -52,8 +52,13 @@ existing scripts keep working; `Role::name()` always returns the new spelling.
      only the server's kache index has the global hit-count view, and one
      evictor per store avoids races.
   4. `~/.local/share/rbs/shim/cargo` → hardlink to `self_exe`, symlink
-     fallback; an existing link is replaced. Prints
-     `export PATH="$HOME/.local/share/rbs/shim:$PATH"`.
+     fallback; an existing link is replaced. `setup` only **prints**
+     `export PATH="$HOME/.local/share/rbs/shim:$PATH"` — it never edits a shell
+     profile, so on its own it leaves the shim installed but unused (and
+     `doctor`'s `shim-precedence` failing). Putting that line on the host is the
+     job of `rbs bootstrap`'s `shim-path` step (`[bootstrap] shim_on_path`, on by
+     default; see `docs/features/bootstrap.md`); a host set up by hand still has
+     to add it by hand.
   5. Client role with `--remote-host H`: `ssh H mkdir -p .local/bin`,
      `scp <self_exe> H:.local/bin/rbs`, `ssh H .local/bin/rbs setup --role server
      [--force]`; the remote's stdout is echoed. The server role ignores

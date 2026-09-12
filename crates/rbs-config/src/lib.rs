@@ -228,6 +228,10 @@ pub struct Bootstrap {
     pub toolchain: String,
     /// Local `kache` binary to push. Empty = `~/.local/bin/kache`.
     pub kache_bin: String,
+    /// Append the shim `export PATH=…` block to each host's shell profile, so
+    /// a bootstrapped host actually routes `cargo` through rbs. On by default:
+    /// without it the shim is installed but never on PATH.
+    pub shim_on_path: bool,
 }
 
 impl Default for Bootstrap {
@@ -238,6 +242,7 @@ impl Default for Bootstrap {
             push_secrets: false,
             toolchain: String::new(),
             kache_bin: String::new(),
+            shim_on_path: true,
         }
     }
 }
@@ -429,7 +434,31 @@ mod tests {
         assert!(!b.push_secrets, "secrets never leave the host by default");
         assert_eq!(b.toolchain, "");
         assert_eq!(b.kache_bin, "");
+        assert!(
+            b.shim_on_path,
+            "a bootstrapped host must actually use the shim"
+        );
         assert_eq!(Config::default().bootstrap, b);
+    }
+
+    #[test]
+    fn bootstrap_shim_on_path_parses_and_defaults_to_true() {
+        let c = Config::from_toml(Path::new("t.toml"), "[bootstrap]\nshim_on_path = false\n")
+            .expect("parse");
+        assert!(!c.bootstrap.shim_on_path);
+        assert_eq!(c.bootstrap.server, "node0");
+
+        let c = Config::from_toml(Path::new("t.toml"), "[bootstrap]\nshim_on_path = true\n")
+            .expect("parse");
+        assert!(c.bootstrap.shim_on_path);
+
+        let c = Config::from_toml(Path::new("t.toml"), "[bootstrap]\nserver = \"big\"\n")
+            .expect("parse");
+        assert!(c.bootstrap.shim_on_path, "omitted key keeps the default");
+
+        let err = Config::from_toml(Path::new("t.toml"), "[bootstrap]\nshim_on_paths = true\n")
+            .expect_err("must fail");
+        assert!(matches!(err, ConfigError::Parse { .. }));
     }
 
     #[test]
