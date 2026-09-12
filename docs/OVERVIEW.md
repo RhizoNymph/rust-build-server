@@ -28,8 +28,9 @@ Overview:
       everything with `rbs doctor`.
     bootstrap: >
       `rbs bootstrap` drives setup across the whole fleet (one server, N
-      clients) over ssh: pushes binaries, ensures the pinned toolchain and the
-      client→server ssh alias, runs setup and doctor per host.
+      clients) over ssh: pushes binaries, ensures the pinned toolchain, the
+      client→server ssh alias and the shim PATH line in each host's shell
+      profile, then runs setup and doctor per host through a login shell.
   data_flow: |
     agent ── exec `cargo <args>` ──▶ cargo shim (rbs-client)
       ├─ load Config; honor escape hatches (RBS_MODE=local|plain, RBS_LOCAL=1)
@@ -97,7 +98,8 @@ Features Index:
     description: >
       Provision or upgrade every host of the fleet (one server, N clients)
       over ssh with one command: binaries, secrets policy, ssh alias,
-      toolchain, remote setup, remote doctor; per-host report.
+      toolchain, the shim PATH line, remote setup, remote doctor; per-host
+      report. PATH-dependent steps run under `ssh <host> bash -lc '<cmd>'`.
     entry_points: ["rbs bootstrap", crates/rbs-setup/src/bootstrap.rs]
     depends_on: [config, setup]
     doc: docs/features/bootstrap.md
