@@ -46,9 +46,12 @@ Overview:
       ├─ server: admission (tokens, MemAvailable, queue) → systemd-run scope →
       │    spawn cargo with MAKEFLAGS=--jobserver-auth=fifo:<pool> and
       │    RUSTC_WRAPPER=kache; kache daemon uploads artifacts to S3 async
-      └─ remote + subcommand in {build} and post_build=pull_and_link:
-           `kache sync --pull` then local `cargo build` (all hits → link only)
-           so target/ exists on the laptop for the agent's next step.
+      ├─ remote + subcommand in {build} and post_build=pull_and_link:
+      │    `kache sync --pull` then local `cargo build` (all hits → link only)
+      │    so target/ exists on the laptop for the agent's next step.
+      └─ successful compiling build (any backend): detached `rbs store-touch`
+           refreshes S3 last-modified on this workspace's store objects
+           (throttled), so the store GC sees them as in use.
 
 Features Index:
   proto:
@@ -87,9 +90,13 @@ Features Index:
     depends_on: [config, client]
     doc: docs/features/setup.md
   store_gc:
-    description: Size cap + LFU eviction for the shared kache S3 store (daily timer on node0).
-    entry_points: [crates/rbs-store/src/lib.rs, "rbs store-gc"]
-    depends_on: [config, setup]
+    description: >
+      Size cap + LFU eviction for the shared kache S3 store (daily timer on
+      node0), plus `rbs store-touch`: active workspaces refresh their objects'
+      S3 last-modified after builds so eviction recency is store-wide, not
+      just node0's index.
+    entry_points: [crates/rbs-store/src/lib.rs, "rbs store-gc", "rbs store-touch"]
+    depends_on: [config, sync, setup]
     doc: docs/features/store-gc.md
 ```
 

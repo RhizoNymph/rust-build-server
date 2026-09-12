@@ -60,6 +60,10 @@ pub fn format_plan(plan: &GcPlan, now: DateTime<Utc>) -> String {
             ));
         }
     }
+    for object in &plan.junk {
+        let age_hours = (now - object.last_modified).num_hours();
+        out.push_str(&format!("junk {} age={age_hours}h\n", object.key));
+    }
     out
 }
 
@@ -77,12 +81,14 @@ pub async fn execute_plan(
         evicted: plan.evictions.iter().map(|e| e.objects.len() as u64).sum(),
         freed_bytes: plan.freed_bytes,
         skipped_young: plan.skipped_young,
+        junk_deleted: plan.junk.len() as u64,
     };
     if dry_run {
         print!("{}", format_plan(plan, now));
         info!(
             evictions = plan.evictions.len(),
             freed_bytes = plan.freed_bytes,
+            junk = plan.junk.len(),
             "dry run: nothing deleted"
         );
         return Ok(report);
@@ -91,6 +97,7 @@ pub async fn execute_plan(
         .evictions
         .iter()
         .flat_map(|e| e.objects.iter().map(|o| o.key.as_str()))
+        .chain(plan.junk.iter().map(|o| o.key.as_str()))
         .collect();
     stream::iter(keys)
         .map(|key| async move {
@@ -116,6 +123,7 @@ pub async fn execute_plan(
         evicted = report.evicted,
         freed_bytes = report.freed_bytes,
         skipped_young = report.skipped_young,
+        junk_deleted = report.junk_deleted,
         "gc complete"
     );
     Ok(report)
@@ -273,6 +281,53 @@ mod tests {
         assert_eq!(plan.evictions.len(), 1);
         let report = execute_plan(&store, &plan, false, now()).await.expect("gc");
         assert_eq!(report.evicted, 1);
+    }
+
+    #[tokio::test]
+    async fn stranded_touch_tmp_is_deleted_even_under_cap() {
+        let store = InMemory::new();
+        let pk1 = pack_key(1, "serde");
+        let mk1 = manifest_key(1, "serde");
+        let tmp = format!("{}.touch-tmp", pack_key(1, "serde"));
+        let mut objects = seed(&store, &[(&pk1, 2), (&mk1, 1), (&tmp, 2)]).await;
+        // A fresh tmp (touch in flight) must survive; only list it, not store it.
+        let young_tmp = format!("{}.touch-tmp", manifest_key(2, "tokio"));
+        objects.push(RemoteObject {
+            key: young_tmp,
+            size: 1,
+            last_modified: now() - Duration::hours(1),
+        });
+
+        let plan = plan(&objects, &Default::default(), &params());
+        assert!(plan.evictions.is_empty(), "under cap: no evictions");
+
+        // dry run deletes nothing, reports the junk
+        let report = execute_plan(&store, &plan, true, now()).await.expect("gc");
+        assert_eq!(report.junk_deleted, 1);
+        assert!(remaining_keys(&store).await.contains(&tmp));
+
+        // real run removes exactly the stranded tmp
+        let report = execute_plan(&store, &plan, false, now()).await.expect("gc");
+        assert_eq!(report.junk_deleted, 1);
+        assert_eq!(report.evicted, 0);
+        assert_eq!(
+            remaining_keys(&store).await,
+            BTreeSet::from([pk1, mk1]),
+            "pair kept, stranded tmp gone"
+        );
+    }
+
+    #[test]
+    fn format_plan_lists_junk() {
+        let objects = vec![RemoteObject {
+            key: format!("{}.touch-tmp", pack_key(1, "serde")),
+            size: 1,
+            last_modified: now() - Duration::hours(48),
+        }];
+        let p = plan(&objects, &Default::default(), &params());
+        let text = format_plan(&p, now());
+        assert!(text.contains("junk "), "{text}");
+        assert!(text.contains(".touch-tmp age=48h"), "{text}");
     }
 
     #[test]
