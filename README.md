@@ -46,9 +46,24 @@ S3-compatible store for kache (a MinIO container works: see
 ```sh
 cargo build --release
 cp target/release/rbs ~/.local/bin/rbs
-rbs setup --role laptop --remote-host <host>   # provisions this machine and the remote
+rbs setup --role client --remote-host <host>   # provisions this machine and the server
 export PATH="$HOME/.local/share/rbs/shim:$PATH"  # put in agent environments / shell rc
 rbs doctor --remote                            # verify everything
+```
+
+More than one client machine? Describe the fleet once in
+`~/.config/rbs/config.toml` and provision (or later upgrade) all of it with one
+command:
+
+```toml
+[bootstrap]
+server = "node0"
+clients = ["lap", "desk"]
+```
+
+```sh
+rbs bootstrap --dry-run   # show the plan per host, run nothing
+rbs bootstrap             # push binaries, ensure toolchain + ssh alias, setup + doctor each host
 ```
 
 Escape hatches: `RBS_MODE=remote|local|plain`, `RBS_LOCAL=1`,
