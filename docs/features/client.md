@@ -50,8 +50,22 @@ a build ran where it did.
      Rejected::Saturated / other / transport error → warn, next backend
 7. if backend == remote && cargo policy && argv[1] == "build" && status.success()
       && post_build == pull_and_link:
-     rbs_sync::pull(root) (failure → warn, continue); exec real `cargo build <same args>`
+     spawn store-touch (see 9); rbs_sync::pull(root) (failure → warn, continue);
+     exec real `cargo build <same args>`
 8. exit with ExitStatus::as_process_exit_code() (Code(n) → n, Signal(s) → 128+s)
+9. store-touch trigger: when cargo policy applies, `cfg.store.touch` is true and
+   argv[1] ∈ COMPILING_SUBCOMMANDS (build, test, check, clippy, doc, bench, run),
+   fire-and-forget `hooks.spawn_touch(dir)` → detached
+   `<current_exe> store-touch --workspace <dir>` (own process group, stdio
+   null; spawn failure = debug log). Server-backed jobs fire it after a
+   successful exit (dir = cwd; the remote pull-and-link path fires with the
+   already-resolved root). Every locally *exec'd* cargo replaces the process,
+   so those paths fire it BEFORE the exec (the detached child outlives it):
+   mode=plain, local_subcommands bypass, fingerprint-failure fallback, and the
+   plain backend in the chain. Consequence: for exec'd plain builds the touch
+   fires regardless of the build's eventual exit code. Never fired for
+   passthrough subcommands, failed server-backed jobs, `rbs exec`
+   (cargo_policy=false), or `store.touch = false`.
 ```
 The job env always contains `RBS_SHIM_ACTIVE=1`; exec'd real cargo gets
 `RUSTC_WRAPPER=kache` (unless already set) and `RBS_SHIM_ACTIVE=1`.
@@ -80,8 +94,8 @@ discovered later in the chain; failure there falls through like any other).
 `Decision { chain, skipped: Vec<Skip { backend, reason: SkipReason }> }`.
 
 ## Files
-- `crates/rbs-client/src/main.rs` — argv[0] dispatch, clap CLI, logging init, `RealHooks` (production `shim::Hooks`), signal future (SIGINT/SIGTERM).
-- `crates/rbs-client/src/shim.rs` — `ShimInput`, `Hooks` trait (remote/local transports, fingerprint, workspace_root, push, pull, exec_local, stdout, stderr, cancel_signal), `run(input, &hooks) -> i32`, `submit` (event pump + cancel forwarding).
+- `crates/rbs-client/src/main.rs` — argv[0] dispatch, clap CLI (incl. `rbs store-touch`), logging init, `RealHooks` (production `shim::Hooks`), signal future (SIGINT/SIGTERM).
+- `crates/rbs-client/src/shim.rs` — `ShimInput`, `Hooks` trait (remote/local transports, fingerprint, workspace_root, push, pull, exec_local, spawn_touch, stdout, stderr, cancel_signal), `run(input, &hooks) -> i32`, `submit` (event pump + cancel forwarding), `COMPILING_SUBCOMMANDS`.
 - `crates/rbs-client/src/backend.rs` — `Backend`, `RemoteProbe`, `SkipReason`, `Decision`, `select()`.
 - `crates/rbs-client/src/transport.rs` — `Transport` / `Conn` traits (boxed futures, object-safe), `Framed<R,W>` newline-JSON duplex, `UnixTransport`, `SshTransport` (`ssh -o BatchMode=yes -o ConnectTimeout=<ceil secs> <host> rbs proxy`, child kept alive by the conn, killed on drop), `FakeTransport` (test-only: scripted replies, records sends, counts connects), `probe()`, `hello()`, `probe_with_timeout()`.
 - `crates/rbs-client/src/local.rs` — `LocalTransport` (unix socket + autostart/retry).
@@ -93,7 +107,11 @@ discovered later in the chain; failure there falls through like any other).
 ## Tests (hermetic, `cargo test -p rbs`)
 - `backend`: every row of the table, RTT boundary (== max ok, +1 skipped), disabled flags.
 - `transport`: framing round trip over `tokio::io::duplex` (Hello/Status/Submit/Events incl. non-UTF-8 bytes), version mismatch, closed/unexpected, truncated frame at EOF, ssh argv.
-- `shim` against `FakeTransport`: streaming to the right fds + exit code (incl. signal → 128+n), ToolchainMismatch → exit 1 with no local connect and no exec, Saturated → local, `local_subcommands` bypass, plain mode, pull-and-link after a successful remote build only, push failure → local, probe failure → local → plain, forced remote errors without fallback, not-accepting remote is never pushed to, `rbs exec` ignores cargo policy.
+- `shim` against `FakeTransport`: streaming to the right fds + exit code (incl. signal → 128+n), ToolchainMismatch → exit 1 with no local connect and no exec, Saturated → local, `local_subcommands` bypass, plain mode, pull-and-link after a successful remote build only, push failure → local, probe failure → local → plain, forced remote errors without fallback, not-accepting remote is never pushed to, `rbs exec` ignores cargo policy;
+  store-touch trigger matrix: fired on success for compiling subcommands on
+  remote/local/plain (pre-exec ordering asserted on exec'd paths), not on
+  failed jobs, not for passthrough, not for `rbs exec`, not when
+  `store.touch = false`.
 - `real_cargo`: PATH walk skips the shim dir, CARGO_HOME / ~/.cargo preference, non-executables ignored, env of the exec'd command.
 - `local`: fails fast without autostart, spawn failure reported, autostart connects once the (fake, python3) server listens.
 - `status`: line formatting for ok / unavailable.

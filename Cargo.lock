@@ -1404,6 +1404,7 @@ dependencies = [
  "futures",
  "object_store",
  "rbs-config",
+ "rbs-sync",
  "rusqlite",
  "serde",
  "tempfile",

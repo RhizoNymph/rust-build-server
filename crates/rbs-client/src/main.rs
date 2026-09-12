@@ -67,6 +67,16 @@ enum Cmd {
         #[arg(long)]
         max_size_gib: Option<u32>,
     },
+    /// Refresh S3 last-modified on this workspace's store objects so the GC
+    /// sees them as in use (throttled per workspace).
+    StoreTouch {
+        /// Directory inside the workspace to touch (default: cwd).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Run even if the throttle stamp is fresh.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn parse_mode(s: &str) -> Result<Mode, String> {
@@ -166,6 +176,27 @@ impl shim::Hooks for RealHooks {
         };
         tracing::error!(error = %err, "failed to run command locally");
         1
+    }
+    fn spawn_touch(&self, dir: &Path) {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        // Fully detached: own process group, no stdio. It must never block the
+        // build or change its exit code; failure to spawn is only debug noise.
+        let result = Command::new(&self.exe)
+            .arg("store-touch")
+            .arg("--workspace")
+            .arg(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn();
+        match result {
+            Ok(child) => {
+                tracing::debug!(pid = child.id(), dir = %dir.display(), "spawned store-touch");
+            }
+            Err(e) => tracing::debug!(error = %e, "failed to spawn store-touch"),
+        }
     }
     fn stdout(&self, bytes: &[u8]) {
         use std::io::Write;
@@ -294,6 +325,11 @@ async fn cli_main() -> anyhow::Result<i32> {
                 max_size_gib_override: max_size_gib,
             })
             .await?;
+            println!("{report}");
+            Ok(0)
+        }
+        Cmd::StoreTouch { workspace, force } => {
+            let report = rbs_store::run_touch(rbs_store::TouchOpts { workspace, force }).await?;
             println!("{report}");
             Ok(0)
         }

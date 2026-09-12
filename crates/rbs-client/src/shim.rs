@@ -72,6 +72,20 @@ impl ShimInput {
     }
 }
 
+/// Cargo subcommands that compile (and therefore use the workspace's kache
+/// store objects): after one succeeds, the shim fires a detached
+/// `rbs store-touch` so the shared store sees this workspace as active.
+pub const COMPILING_SUBCOMMANDS: &[&str] =
+    &["bench", "build", "check", "clippy", "doc", "run", "test"];
+
+/// Whether this invocation should fire a store touch: cargo policy applies,
+/// `[store] touch` is enabled, and the subcommand compiles.
+fn wants_touch(input: &ShimInput, sub: Option<&str>) -> bool {
+    input.cargo_policy
+        && input.cfg.store.touch
+        && sub.is_some_and(|s| COMPILING_SUBCOMMANDS.contains(&s))
+}
+
 /// Injectable side effects.
 pub trait Hooks: Send + Sync {
     /// `None` = no remote configured for this run.
@@ -86,6 +100,10 @@ pub trait Hooks: Send + Sync {
     /// Run `argv` on this machine (exec in production). Returns the exit code
     /// if it returns at all.
     fn exec_local(&self, argv: &[String]) -> i32;
+    /// Fire-and-forget `rbs store-touch --workspace <dir>`, fully detached.
+    /// Must never block or affect the build's exit code; `dir` may be any
+    /// directory inside the workspace (the touch resolves the root itself).
+    fn spawn_touch(&self, dir: &Path);
     fn stdout(&self, bytes: &[u8]);
     fn stderr(&self, bytes: &[u8]);
     /// Resolves when the user asked to interrupt (SIGINT/SIGTERM).
@@ -159,8 +177,17 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
     let mode = input.cfg.policy.mode;
     let sub = input.subcommand().map(str::to_string);
 
+    // Exec replaces the process, so for locally exec'd builds the touch must
+    // be spawned *before* the exec (the detached child outlives it).
+    let touch_before_exec = |dir: &Path| {
+        if wants_touch(&input, sub.as_deref()) {
+            hooks.spawn_touch(dir);
+        }
+    };
+
     if mode == Mode::Plain {
         tracing::debug!("mode=plain; running locally");
+        touch_before_exec(&input.cwd);
         return hooks.exec_local(&input.argv);
     }
     if input.cargo_policy && is_passthrough(sub.as_deref()) {
@@ -172,6 +199,7 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
         && input.cfg.policy.local_subcommands.iter().any(|l| l == s)
     {
         tracing::debug!(subcommand = %s, "local_subcommands bypass; running locally");
+        touch_before_exec(&input.cwd);
         return hooks.exec_local(&input.argv);
     }
 
@@ -180,6 +208,7 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
         Err(e) => {
             if mode == Mode::Auto {
                 tracing::warn!(error = %e, "could not fingerprint toolchain; running locally");
+                touch_before_exec(&input.cwd);
                 return hooks.exec_local(&input.argv);
             }
             tracing::error!(error = %e, "could not fingerprint toolchain");
@@ -232,6 +261,7 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
         let outcome = match backend {
             Backend::Plain => {
                 tracing::debug!("running plain cargo locally");
+                touch_before_exec(&input.cwd);
                 return hooks.exec_local(&input.argv);
             }
             Backend::Remote => {
@@ -258,6 +288,11 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
                     && sub.as_deref() == Some("build")
                     && input.cfg.policy.post_build == PostBuild::PullAndLink
                 {
+                    // This path exec's the local link step, so the touch must
+                    // be spawned first (root is already resolved here).
+                    if wants_touch(&input, sub.as_deref()) {
+                        hooks.spawn_touch(&root);
+                    }
                     if let Err(e) = hooks.pull(&root).await {
                         tracing::warn!(error = %e, "kache pull failed; local build will rebuild misses");
                     }
@@ -291,6 +326,9 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
         match outcome {
             Outcome::Exited(status) => {
                 tracing::debug!(backend = %backend, ?status, "job finished");
+                if status.success() && wants_touch(&input, sub.as_deref()) {
+                    hooks.spawn_touch(&input.cwd);
+                }
                 return status.as_process_exit_code();
             }
             Outcome::ToolchainMismatch {
@@ -482,6 +520,9 @@ mod tests {
         exec: Vec<Vec<String>>,
         pushes: Vec<(PathBuf, String)>,
         pulls: Vec<PathBuf>,
+        touches: Vec<PathBuf>,
+        /// Interleaved order of side effects ("touch", "exec").
+        events: Vec<&'static str>,
         out: Vec<u8>,
         err: Vec<u8>,
     }
@@ -547,8 +588,15 @@ mod tests {
             Ok(())
         }
         fn exec_local(&self, argv: &[String]) -> i32 {
-            self.calls().exec.push(argv.to_vec());
+            let mut calls = self.calls();
+            calls.exec.push(argv.to_vec());
+            calls.events.push("exec");
             self.exec_code
+        }
+        fn spawn_touch(&self, dir: &Path) {
+            let mut calls = self.calls();
+            calls.touches.push(dir.to_path_buf());
+            calls.events.push("touch");
         }
         fn stdout(&self, bytes: &[u8]) {
             self.calls().out.extend_from_slice(bytes);
@@ -880,6 +928,142 @@ mod tests {
         let hooks = TestHooks::new(Some(remote), Some(FakeTransport::scripted(local_script)));
         assert_eq!(run(input(&["build"], Mode::Auto), &hooks).await, 0);
         assert!(hooks.calls().pushes.is_empty());
+    }
+
+    #[test]
+    fn compiling_subcommands_table() {
+        for s in ["bench", "build", "check", "clippy", "doc", "run", "test"] {
+            assert!(COMPILING_SUBCOMMANDS.contains(&s), "{s}");
+        }
+        assert!(!COMPILING_SUBCOMMANDS.contains(&"metadata"));
+        assert!(!COMPILING_SUBCOMMANDS.contains(&"fmt"));
+        assert!(!COMPILING_SUBCOMMANDS.contains(&"clean"));
+    }
+
+    #[tokio::test]
+    async fn touch_fires_after_successful_remote_build_before_the_link_exec() {
+        let mut script = vec![hello_msg("node0"), status_msg(true)];
+        script.extend(job_events(0));
+        let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), None);
+        assert_eq!(run(input(&["build"], Mode::Auto), &hooks).await, 0);
+        let calls = hooks.calls();
+        assert_eq!(calls.touches, vec![PathBuf::from("/w")]);
+        assert_eq!(
+            calls.events,
+            vec!["touch", "exec"],
+            "touch spawned before the link step exec"
+        );
+    }
+
+    #[tokio::test]
+    async fn touch_fires_after_successful_remote_non_build_compile() {
+        let mut script = vec![hello_msg("node0"), status_msg(true)];
+        script.extend(job_events(0));
+        let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), None);
+        assert_eq!(run(input(&["check"], Mode::Auto), &hooks).await, 0);
+        let calls = hooks.calls();
+        assert_eq!(calls.touches, vec![PathBuf::from("/w")]);
+        assert!(calls.exec.is_empty(), "check has no link step");
+    }
+
+    #[tokio::test]
+    async fn touch_fires_after_successful_local_backend_job() {
+        let mut local_script = vec![hello_msg("laptop")];
+        local_script.extend(job_events(0));
+        let hooks = TestHooks::new(None, Some(FakeTransport::scripted(local_script)));
+        assert_eq!(run(input(&["test"], Mode::Local), &hooks).await, 0);
+        assert_eq!(hooks.calls().touches, vec![PathBuf::from("/w")]);
+    }
+
+    #[tokio::test]
+    async fn touch_fires_before_plain_exec() {
+        let hooks = TestHooks::new(None, None);
+        assert_eq!(run(input(&["build"], Mode::Plain), &hooks).await, 0);
+        let calls = hooks.calls();
+        assert_eq!(calls.touches, vec![PathBuf::from("/w")]);
+        assert_eq!(
+            calls.events,
+            vec!["touch", "exec"],
+            "exec replaces the process, so the touch must be spawned first"
+        );
+    }
+
+    #[tokio::test]
+    async fn touch_fires_before_plain_backend_fallback_exec() {
+        let hooks = TestHooks::new(
+            Some(FakeTransport::failing("ssh: connection refused")),
+            Some(FakeTransport::failing("no socket")),
+        );
+        assert_eq!(run(input(&["build"], Mode::Auto), &hooks).await, 0);
+        let calls = hooks.calls();
+        assert_eq!(calls.touches, vec![PathBuf::from("/w")]);
+        assert_eq!(calls.events, vec!["touch", "exec"]);
+    }
+
+    #[tokio::test]
+    async fn touch_fires_before_local_subcommand_exec() {
+        let hooks = TestHooks::new(None, None);
+        assert_eq!(run(input(&["run", "--", "x"], Mode::Auto), &hooks).await, 0);
+        let calls = hooks.calls();
+        assert_eq!(calls.touches, vec![PathBuf::from("/w")]);
+        assert_eq!(calls.events, vec!["touch", "exec"]);
+    }
+
+    #[tokio::test]
+    async fn touch_not_fired_on_a_failed_build() {
+        let mut script = vec![hello_msg("node0"), status_msg(true)];
+        script.extend(job_events(101));
+        let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), None);
+        assert_eq!(run(input(&["build"], Mode::Auto), &hooks).await, 101);
+        assert!(hooks.calls().touches.is_empty());
+
+        let hooks = TestHooks {
+            exec_code: 1,
+            ..TestHooks::new(None, None)
+        };
+        // plain exec fires pre-exec by design, so a *failing plain* build does
+        // touch; but a non-compiling plain invocation must not.
+        assert_eq!(run(input(&["metadata"], Mode::Plain), &hooks).await, 1);
+        assert!(hooks.calls().touches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn touch_not_fired_for_passthrough_subcommands() {
+        for args in [vec!["metadata"], vec!["fmt"], vec!["-V"], vec![]] {
+            let hooks = TestHooks::new(None, None);
+            run(input(&args, Mode::Auto), &hooks).await;
+            assert!(hooks.calls().touches.is_empty(), "{args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn touch_not_fired_when_disabled_in_config() {
+        // plain exec path
+        let hooks = TestHooks::new(None, None);
+        let mut inp = input(&["build"], Mode::Plain);
+        inp.cfg.store.touch = false;
+        assert_eq!(run(inp, &hooks).await, 0);
+        assert!(hooks.calls().touches.is_empty());
+
+        // server-backed path
+        let mut script = vec![hello_msg("node0"), status_msg(true)];
+        script.extend(job_events(0));
+        let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), None);
+        let mut inp = input(&["check"], Mode::Auto);
+        inp.cfg.store.touch = false;
+        assert_eq!(run(inp, &hooks).await, 0);
+        assert!(hooks.calls().touches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn touch_not_fired_for_rbs_exec() {
+        let mut local_script = vec![hello_msg("laptop")];
+        local_script.extend(job_events(0));
+        let hooks = TestHooks::new(None, Some(FakeTransport::scripted(local_script)));
+        let mut inp = input(&["build"], Mode::Local);
+        inp.cargo_policy = false; // `rbs exec -- cargo build`
+        assert_eq!(run(inp, &hooks).await, 0);
+        assert!(hooks.calls().touches.is_empty());
     }
 
     #[tokio::test]

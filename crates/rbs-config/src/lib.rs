@@ -174,6 +174,12 @@ pub struct Store {
     pub low_watermark_percent: u8,
     /// Objects whose S3 last-modified is newer than this are never evicted.
     pub min_age_hours: u32,
+    /// Refresh S3 last-modified on a workspace's store objects after builds
+    /// (`rbs store-touch`), so recency is store-wide rather than per-host.
+    pub touch: bool,
+    /// Touch at most once per workspace within this window; objects whose
+    /// last-modified is younger than this are not rewritten.
+    pub touch_after_hours: u32,
 }
 
 impl Default for Store {
@@ -182,6 +188,8 @@ impl Default for Store {
             max_size_gib: 40,
             low_watermark_percent: 90,
             min_age_hours: 24,
+            touch: true,
+            touch_after_hours: 24,
         }
     }
 }
@@ -335,7 +343,25 @@ mod tests {
         assert_eq!(s.max_size_gib, 40);
         assert_eq!(s.low_watermark_percent, 90);
         assert_eq!(s.min_age_hours, 24);
+        assert!(s.touch);
+        assert_eq!(s.touch_after_hours, 24);
         assert_eq!(Config::default().store, s);
+    }
+
+    #[test]
+    fn store_touch_parses_and_fills_defaults() {
+        let c = Config::from_toml(Path::new("t.toml"), "[store]\ntouch = false\n").expect("parse");
+        assert!(!c.store.touch);
+        assert_eq!(c.store.touch_after_hours, 24);
+        assert_eq!(c.store.max_size_gib, 40);
+
+        let c = Config::from_toml(
+            Path::new("t.toml"),
+            "[store]\ntouch = true\ntouch_after_hours = 6\n",
+        )
+        .expect("parse");
+        assert!(c.store.touch);
+        assert_eq!(c.store.touch_after_hours, 6);
     }
 
     #[test]

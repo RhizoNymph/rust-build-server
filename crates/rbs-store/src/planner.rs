@@ -15,6 +15,10 @@ pub struct RemoteObject {
     pub last_modified: DateTime<Utc>,
 }
 
+/// Suffix of the intermediate key `rbs store-touch` copies through. A crashed
+/// touch can strand one; GC treats them as junk.
+pub const TOUCH_TMP_SUFFIX: &str = ".touch-tmp";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     Pack,
@@ -106,8 +110,12 @@ pub struct Eviction {
     pub crate_name: String,
     pub objects: Vec<RemoteObject>,
     pub hit_count: i64,
+    /// Effective recency: `max(index last_accessed, S3 last_modified)`, so a
+    /// store-touch by another machine counts as use. Absent from the index →
+    /// just the S3 last_modified. Both the min-age guard and the LFU tiebreak
+    /// use this.
     pub last_accessed: DateTime<Utc>,
-    /// Newest S3 last-modified among the objects (what the age guard checks).
+    /// Newest S3 last-modified among the objects.
     pub last_modified: DateTime<Utc>,
     pub reason: EvictReason,
 }
@@ -131,6 +139,9 @@ pub struct GcPlan {
     pub freed_bytes: u64,
     /// Objects protected by `min_age` while the store was still over target.
     pub skipped_young: u64,
+    /// Stranded `*.touch-tmp` objects older than `min_age`: deleted regardless
+    /// of the cap and never counted toward `total_bytes`.
+    pub junk: Vec<RemoteObject>,
 }
 
 #[derive(Debug, Default)]
@@ -150,10 +161,26 @@ impl Group {
 /// byte-identical plans (BTreeMap grouping + total ordering on candidates).
 pub fn plan(objects: &[RemoteObject], index: &UsageMap, params: &GcParams) -> GcPlan {
     let scanned = objects.len() as u64;
-    let total_bytes: u64 = objects.iter().map(|o| o.size).sum();
+    let cutoff = params.now - params.min_age;
+    let mut junk = Vec::new();
+    let mut managed: Vec<&RemoteObject> = Vec::new();
+    let mut total_bytes = 0u64;
+    for obj in objects {
+        if obj.key.ends_with(TOUCH_TMP_SUFFIX) {
+            // Stranded touch intermediates: junk, not store content. Young
+            // ones may belong to a touch in flight and are left alone.
+            if obj.last_modified <= cutoff {
+                junk.push(obj.clone());
+            }
+            continue;
+        }
+        total_bytes += obj.size;
+        managed.push(obj);
+    }
     let mut plan = GcPlan {
         scanned,
         total_bytes,
+        junk,
         ..GcPlan::default()
     };
     if total_bytes <= params.max_bytes {
@@ -161,7 +188,7 @@ pub fn plan(objects: &[RemoteObject], index: &UsageMap, params: &GcParams) -> Gc
     }
 
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
-    for obj in objects {
+    for obj in managed {
         let Some(parsed) = parse_object_key("", key_without_prefix(&obj.key)) else {
             continue;
         };
@@ -190,7 +217,9 @@ pub fn plan(objects: &[RemoteObject], index: &UsageMap, params: &GcParams) -> Gc
                 .unwrap_or(params.now);
             let usage = index.get(&cache_key).cloned().unwrap_or_default();
             Eviction {
-                last_accessed: usage.last_accessed.unwrap_or(last_modified),
+                last_accessed: usage
+                    .last_accessed
+                    .map_or(last_modified, |la| la.max(last_modified)),
                 hit_count: usage.hit_count,
                 last_modified,
                 cache_key,
@@ -215,13 +244,14 @@ pub fn plan(objects: &[RemoteObject], index: &UsageMap, params: &GcParams) -> Gc
             ))
     });
 
-    let cutoff = params.now - params.min_age;
     let mut remaining = total_bytes;
     for candidate in candidates {
         if remaining <= params.watermark_bytes {
             break;
         }
-        if candidate.last_modified > cutoff {
+        // `last_accessed` is the effective recency (≥ last_modified), so this
+        // guard protects both freshly uploaded and freshly used/touched groups.
+        if candidate.last_accessed > cutoff {
             plan.skipped_young += candidate.objects.len() as u64;
             continue;
         }
@@ -315,6 +345,7 @@ mod tests {
                 max_size_gib: 40,
                 low_watermark_percent: 90,
                 min_age_hours: 24,
+                ..rbs_config::Store::default()
             },
             now(),
         );
@@ -327,6 +358,7 @@ mod tests {
                 max_size_gib: 1,
                 low_watermark_percent: 150,
                 min_age_hours: 0,
+                ..rbs_config::Store::default()
             },
             now(),
         );
@@ -389,7 +421,7 @@ mod tests {
             manifest(2, "b", 1, 48),
         ];
         // key 1 hot, key 2 cold; total 12 > 10, watermark 8.
-        let index = usage(&[(1, 100, 1), (2, 1, 1)]);
+        let index = usage(&[(1, 100, 30), (2, 1, 30)]);
         let plan = plan(&objects, &index, &params());
         assert_eq!(evicted_keys(&plan), vec![key(2)]);
         assert_eq!(plan.freed_bytes, 6);
@@ -435,7 +467,7 @@ mod tests {
             manifest(2, "b", 1, 48),
         ];
         // key 1 would be evicted first (0 hits vs 5) but is too young.
-        let index = usage(&[(2, 5, 1)]);
+        let index = usage(&[(2, 5, 30)]);
         let plan = plan(&objects, &index, &params());
         assert_eq!(evicted_keys(&plan), vec![key(2)]);
         assert_eq!(plan.skipped_young, 2);
@@ -449,7 +481,7 @@ mod tests {
             pack(2, "b", 6, 48),
             manifest(2, "b", 1, 48),
         ];
-        let index = usage(&[(2, 5, 1)]);
+        let index = usage(&[(2, 5, 30)]);
         let plan = plan(&objects, &index, &params());
         assert_eq!(evicted_keys(&plan), vec![key(2)]);
         assert_eq!(plan.skipped_young, 2);
@@ -491,7 +523,7 @@ mod tests {
             pack(2, "b", 7, 48),
             manifest(2, "b", 1, 48),
         ];
-        let index = usage(&[(1, 50, 1), (2, 0, 40)]);
+        let index = usage(&[(1, 50, 30), (2, 0, 40)]);
         let plan = plan(&objects, &index, &params());
         assert_eq!(evicted_keys(&plan), vec![key(1)]);
         assert_eq!(plan.evictions[0].reason, EvictReason::Orphan);
@@ -583,9 +615,126 @@ mod tests {
             manifest(3, "c", 1, 48),
         ];
         // total 15; need ≤ 8 → evict two lowest-hit groups (keys 3 then 1).
-        let index = usage(&[(1, 2, 1), (2, 9, 1), (3, 1, 1)]);
+        let index = usage(&[(1, 2, 30), (2, 9, 30), (3, 1, 30)]);
         let plan = plan(&objects, &index, &params());
         assert_eq!(evicted_keys(&plan), vec![key(3), key(1)]);
         assert_eq!(plan.freed_bytes, 10);
+    }
+
+    #[test]
+    fn zero_hit_group_with_fresh_last_modified_is_protected() {
+        // A group another machine just touched: 0 hits here, absent from the
+        // index, but its S3 last_modified is fresh → min_age protects it.
+        let objects = vec![
+            pack(1, "a", 8, 2), // recently touched, hits=0
+            manifest(1, "a", 1, 2),
+            pack(2, "b", 1, 48),
+            manifest(2, "b", 1, 48),
+        ];
+        // total 11 > 10; evicting key 2 leaves 9 > 8, so key 1 is considered
+        // next — and protected by min_age despite its 0 hits.
+        let plan = plan(&objects, &UsageMap::new(), &params());
+        assert_eq!(evicted_keys(&plan), vec![key(2)]);
+        assert_eq!(plan.skipped_young, 2);
+    }
+
+    #[test]
+    fn among_zero_hit_groups_fresher_touched_evicts_later() {
+        // Both 0 hits and absent from the index; effective recency is the S3
+        // last_modified, so the group touched longer ago goes first.
+        let objects = vec![
+            pack(1, "a", 4, 30), // touched more recently
+            manifest(1, "a", 1, 30),
+            pack(2, "b", 4, 72),
+            manifest(2, "b", 1, 72),
+            pack(3, "c", 4, 48),
+            manifest(3, "c", 1, 48),
+        ];
+        // total 15; need ≤ 8 → evict the two least recently touched groups.
+        let plan = plan(&objects, &UsageMap::new(), &params());
+        assert_eq!(evicted_keys(&plan), vec![key(2), key(3)]);
+    }
+
+    #[test]
+    fn index_recency_protects_an_s3_old_group() {
+        // Uploaded long ago but used here recently: effective recency is
+        // max(last_accessed, last_modified) → min_age protects it.
+        let objects = vec![
+            pack(1, "a", 6, 200),
+            manifest(1, "a", 1, 200),
+            pack(2, "b", 6, 48),
+            manifest(2, "b", 1, 48),
+        ];
+        // key 1 has fewer hits so it is considered (and protected) first.
+        let index = usage(&[(1, 0, 2), (2, 1, 40)]);
+        let plan = plan(&objects, &index, &params());
+        assert_eq!(evicted_keys(&plan), vec![key(2)]);
+        assert_eq!(plan.skipped_young, 2);
+    }
+
+    #[test]
+    fn stale_index_recency_never_hides_a_fresh_touch() {
+        // Index says "accessed long ago" but the S3 object was touched
+        // recently: max() keeps the fresher of the two.
+        let objects = vec![
+            pack(1, "a", 6, 2), // freshly touched
+            manifest(1, "a", 1, 2),
+            pack(2, "b", 6, 48),
+            manifest(2, "b", 1, 48),
+        ];
+        // key 1 has fewer hits so it is considered (and protected) first.
+        let index = usage(&[(1, 0, 100), (2, 1, 40)]);
+        let plan = plan(&objects, &index, &params());
+        assert_eq!(evicted_keys(&plan), vec![key(2)]);
+        assert_eq!(plan.skipped_young, 2);
+        assert_eq!(plan.evictions[0].last_accessed, hours_ago(40));
+    }
+
+    #[test]
+    fn touch_tmp_keys_are_junk_not_content() {
+        let old_tmp = RemoteObject {
+            key: format!("artifacts/v3/packs/a/{}.tar.zst.touch-tmp", key(9)),
+            size: 100,
+            last_modified: hours_ago(48),
+        };
+        let young_tmp = RemoteObject {
+            key: format!("artifacts/v3/manifests/a/{}.json.touch-tmp", key(8)),
+            size: 100,
+            last_modified: hours_ago(1),
+        };
+        let objects = vec![
+            old_tmp.clone(),
+            young_tmp,
+            pack(1, "a", 4, 48),
+            manifest(1, "a", 1, 48),
+        ];
+        // tmp bytes never count toward the total: 5 ≤ 10 → no evictions, but
+        // the stranded old tmp is still junk even under the cap.
+        let plan = plan(&objects, &UsageMap::new(), &params());
+        assert_eq!(plan.scanned, 4);
+        assert_eq!(plan.total_bytes, 5);
+        assert!(plan.evictions.is_empty());
+        assert_eq!(plan.junk, vec![old_tmp], "old tmp junked, young tmp kept");
+    }
+
+    #[test]
+    fn junk_is_collected_even_while_evicting() {
+        let old_tmp = RemoteObject {
+            key: format!("artifacts/v3/packs/a/{}.tar.zst.touch-tmp", key(9)),
+            size: 1,
+            last_modified: hours_ago(48),
+        };
+        let objects = vec![
+            old_tmp.clone(),
+            pack(1, "a", 6, 48),
+            manifest(1, "a", 1, 48),
+            pack(2, "b", 6, 48),
+            manifest(2, "b", 1, 48),
+        ];
+        let index = usage(&[(2, 5, 30)]);
+        let plan = plan(&objects, &index, &params());
+        assert_eq!(evicted_keys(&plan), vec![key(1)]);
+        assert_eq!(plan.junk, vec![old_tmp]);
+        assert_eq!(plan.total_bytes, 14, "junk bytes not in the total");
     }
 }
