@@ -30,7 +30,7 @@ Each step records `ok` / `skip` / `FAIL` plus a detail string; `skip` means
 | 3 | `secrets` | `push_secrets = true`: `ssh <host> mkdir -p .config/rbs`, `scp ~/.config/rbs/minio.env <host>:.config/rbs/minio.env`, `ssh <host> chmod 600 …`. `false`: `ssh <host> test -f .config/rbs/minio.env` | `false` + absent on host → note with the exact `scp` command + skip; no local file → note + skip |
 | 4 | `ssh-alias` | clients only: `ssh <client> "test -f .ssh/config && grep -q 'Host <server>' .ssh/config"`; if absent, append a block via `ssh <client> "mkdir -p .ssh && chmod 700 .ssh && printf '%s\n' 'Host <server>' '  HostName <ip>' '  StrictHostKeyChecking accept-new' >> .ssh/config"` | server role → skip; alias present → skip; no `HostName` for the server in the **local** `~/.ssh/config` → note + skip |
 | 5 | `toolchain` | **login shell**: `rustup toolchain list`; when the wanted channel is absent, `rustup toolchain install <ch> --profile minimal` | channel unknown → note + skip; rustup unusable on the host → note carrying the rustup.rs one-liner + skip |
-| 6 | `shim-path` | `ssh <host> test -f .bash_profile` picks the target file, then `ssh <host> "grep -q '# >>> rbs shim >>>' <file>"`; when absent, append the marked block with `printf '%s\n' … >> <file>` | `shim_on_path = false` → skip + note carrying the manual line; already marked → `ok` ("already present") |
+| 6 | `shim-path` | `ssh <host> 'basename "$SHELL"'` = `zsh` → `~/.zprofile`; else `ssh <host> test -f .bash_profile` picks the target file, then `ssh <host> "grep -q '# >>> rbs shim >>>' <file>"`; when absent, append the marked block with `printf '%s\n' … >> <file>` | `shim_on_path = false` → skip + note carrying the manual line; already marked → `ok` ("already present") |
 | 7 | `setup` | **login shell**: `.local/bin/rbs setup --role server\|client [--force]` | non-zero exit → FAIL with the captured output |
 | 8 | `doctor` | **login shell**: `.local/bin/rbs doctor` (server) / `… doctor --remote` (clients, so their link to the server is checked too) | non-zero exit → FAIL listing the failing check names |
 
@@ -93,9 +93,11 @@ export PATH="$HOME/.local/share/rbs/shim:$PATH"
 # <<< rbs shim <<<
 ```
 
-- **Target file**: `~/.profile` (login shells of both bash and sh source it),
-  except when `~/.bash_profile` exists — bash reads that *instead of*
-  `~/.profile`, so appending to `~/.profile` would be silently ignored. The
+- **Target file**: chosen by the host's LOGIN shell. zsh never reads
+  `~/.profile`, so a `$SHELL` ending in `zsh` targets `~/.zprofile` (created by
+  the append if absent). Otherwise `~/.profile` (login shells of both bash and
+  sh source it), except when `~/.bash_profile` exists — bash reads that
+  *instead of* `~/.profile`, so appending there would be silently ignored. The
   choice is made with `ssh <host> test -f .bash_profile`.
 - **Idempotent**: the begin marker is grepped first and the block appended only
   when absent, so a rerun is a no-op and the block stays greppable for later

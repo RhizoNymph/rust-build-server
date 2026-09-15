@@ -681,6 +681,27 @@ fn shim_path_is_a_no_op_when_the_marker_is_already_there() {
 }
 
 #[test]
+fn shim_path_targets_zprofile_for_zsh_login_shells() {
+    let th = home();
+    let r = runner(&[SERVER])
+        .ok_args("ssh", &[SERVER, "basename \"$SHELL\""], "zsh\n")
+        .fail_args("ssh", &[SERVER, &shim_probe(".zprofile")], 1, "");
+    let report =
+        bootstrap_with(&r, &th.paths, &config(SERVER, &[]), &opts(&th)).expect("bootstrap");
+
+    assert!(r.called_with("ssh", &[SERVER, &shim_append(".zprofile")]));
+    let step = host(&report, SERVER)
+        .steps
+        .iter()
+        .find(|s| s.name == "shim-path")
+        .expect("shim-path step");
+    assert_eq!(step.status, StepStatus::Ok);
+    assert!(step.detail.contains(".zprofile"), "{}", step.detail);
+    // The bash-side probe must not even run for a zsh host.
+    assert!(!r.called_with("ssh", &[SERVER, "test -f .bash_profile"]));
+}
+
+#[test]
 fn shim_path_targets_bash_profile_when_the_host_has_one() {
     let th = home();
     // `test -f .bash_profile` succeeds (wildcard), the marker grep does not

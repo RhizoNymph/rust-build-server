@@ -30,6 +30,8 @@ const CONNECT_TIMEOUT_SECS: u32 = 5;
 /// exists: bash reads it *instead of* `~/.profile`.
 const REMOTE_PROFILE: &str = ".profile";
 const REMOTE_BASH_PROFILE: &str = ".bash_profile";
+/// zsh login shells read `~/.zprofile`, never `~/.profile`.
+const REMOTE_ZPROFILE: &str = ".zprofile";
 /// Marked block appended to the profile, so reruns are no-ops and a future
 /// edit (or removal) is one `grep` away.
 const SHIM_MARKER_BEGIN: &str = "# >>> rbs shim >>>";
@@ -558,15 +560,25 @@ impl Fleet<'_> {
             );
             return;
         }
-        // bash reads ~/.bash_profile *instead of* ~/.profile when it exists, so
-        // appending to ~/.profile there would be silently ignored.
-        let file = match run_ok(
-            self.runner,
-            "ssh",
-            &[host, &format!("test -f {REMOTE_BASH_PROFILE}")],
-        ) {
-            Ok(_) => REMOTE_BASH_PROFILE,
-            Err(_) => REMOTE_PROFILE,
+        // Pick the file the host's LOGIN shell actually reads: zsh ignores
+        // ~/.profile entirely (it reads ~/.zprofile), and bash reads
+        // ~/.bash_profile *instead of* ~/.profile when it exists, so appending
+        // to the wrong file is silently ignored. $SHELL over ssh is the login
+        // shell from passwd, so this works from a non-interactive session.
+        let shell = run_ok(self.runner, "ssh", &[host, "basename \"$SHELL\""])
+            .map(|out| out.trim().to_string())
+            .unwrap_or_default();
+        let file = if shell == "zsh" {
+            REMOTE_ZPROFILE
+        } else {
+            match run_ok(
+                self.runner,
+                "ssh",
+                &[host, &format!("test -f {REMOTE_BASH_PROFILE}")],
+            ) {
+                Ok(_) => REMOTE_BASH_PROFILE,
+                Err(_) => REMOTE_PROFILE,
+            }
         };
         let probe = format!("grep -q '{SHIM_MARKER_BEGIN}' {file}");
         if run_ok(self.runner, "ssh", &[host, &probe]).is_ok() {

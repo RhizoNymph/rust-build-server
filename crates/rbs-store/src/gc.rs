@@ -227,7 +227,7 @@ mod tests {
                 (key(2).leak(), "2026-09-09 00:00:00", 42),
             ],
         );
-        let index = load_index_or_empty(&db).expect("index");
+        let index = load_index_or_empty(&db);
 
         let plan = plan(&objects, &index, &params());
         let report = execute_plan(&store, &plan, false, now()).await.expect("gc");
@@ -252,8 +252,7 @@ mod tests {
         let pk2 = pack_key(2, "tokio");
         let mk2 = manifest_key(2, "tokio");
         let objects = seed(&store, &[(&pk1, 6), (&mk1, 1), (&pk2, 5), (&mk2, 1)]).await;
-        let index = load_index_or_empty(std::path::Path::new("/nonexistent/index.db"))
-            .expect("missing index is an empty map");
+        let index = load_index_or_empty(std::path::Path::new("/nonexistent/index.db"));
         assert!(index.is_empty());
 
         let plan = plan(&objects, &index, &params());
