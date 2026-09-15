@@ -75,7 +75,13 @@ curl -fsSL -o rbs https://github.com/RhizoNymph/rust-build-server/releases/lates
 install -m755 rbs ~/.local/bin/rbs
 ```
 
-Or from source: `cargo build --release && install -m755 target/release/rbs ~/.local/bin/rbs`.
+Or straight from git with cargo:
+
+```sh
+cargo install --git https://github.com/RhizoNymph/rust-build-server rbs
+```
+
+Or from a checkout: `cargo build --release && install -m755 target/release/rbs ~/.local/bin/rbs`.
 
 ## Quick start
 
