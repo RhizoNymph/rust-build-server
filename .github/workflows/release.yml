@@ -1,0 +1,31 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release
+      - name: package
+        run: |
+          cp target/release/rbs rbs-x86_64-unknown-linux-gnu
+          sha256sum rbs-x86_64-unknown-linux-gnu > rbs-x86_64-unknown-linux-gnu.sha256
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            rbs-x86_64-unknown-linux-gnu rbs-x86_64-unknown-linux-gnu.sha256 \
+            --generate-notes

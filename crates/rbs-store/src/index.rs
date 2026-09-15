@@ -91,14 +91,27 @@ pub fn load_index(path: &Path) -> Result<UsageMap, IndexError> {
     Ok(map)
 }
 
-/// Load the index, treating a missing file as an empty map (with a warning):
-/// GC then ranks every object as never-hit, which is safe but less precise.
-pub fn load_index_or_empty(path: &Path) -> Result<UsageMap, IndexError> {
+/// Load the index, degrading to an empty map (with a warning) when the file
+/// is missing OR unreadable — including a schema kache no longer matches.
+/// rbs is tested against kache 0.14.x; if a kache upgrade changes the private
+/// `entries` schema, GC must fall back to age-only ranking rather than guess.
+/// An empty map ranks every object as never-hit, which is safe but less precise.
+pub fn load_index_or_empty(path: &Path) -> UsageMap {
     if !path.exists() {
-        warn!(path = %path.display(), "kache index missing; treating all objects as never hit");
-        return Ok(UsageMap::new());
+        warn!(path = %path.display(), "kache index missing; degrading to age-only ranking");
+        return UsageMap::new();
     }
-    load_index(path)
+    match load_index(path) {
+        Ok(map) => map,
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "kache index unreadable (schema change? rbs is tested against kache 0.14.x); degrading to age-only ranking"
+            );
+            UsageMap::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +139,27 @@ pub(crate) mod tests {
             )
             .expect("insert");
         }
+    }
+
+    #[test]
+    fn schema_drift_degrades_to_empty_map() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("index.db");
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        // A future kache that renamed the columns: guessing would misrank
+        // evictions, so the reader must degrade to age-only (empty map).
+        conn.execute("CREATE TABLE entries (key TEXT, uses INTEGER)", [])
+            .expect("schema");
+        drop(conn);
+        assert!(load_index(&db).is_err(), "strict loader must error");
+        assert!(
+            load_index_or_empty(&db).is_empty(),
+            "degraded loader must be empty"
+        );
+        // Not-a-database at all degrades the same way.
+        let junk = dir.path().join("junk.db");
+        std::fs::write(&junk, "not sqlite").expect("write");
+        assert!(load_index_or_empty(&junk).is_empty());
     }
 
     #[test]
@@ -164,7 +198,7 @@ pub(crate) mod tests {
     #[test]
     fn missing_file_yields_empty_map() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let map = load_index_or_empty(&dir.path().join("nope.db")).expect("empty");
+        let map = load_index_or_empty(&dir.path().join("nope.db"));
         assert!(map.is_empty());
         assert!(load_index(&dir.path().join("nope.db")).is_err());
     }

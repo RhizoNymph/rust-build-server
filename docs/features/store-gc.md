@@ -22,7 +22,10 @@ to the kache index, choosing what kache uploads, MinIO administration.
   (`~/.cache/kache/index.db`, table `entries`: `cache_key`, `hit_count`,
   `last_accessed`), opened read-only (`?mode=ro`). GC runs on node0, where
   every remote build executes, so these hit counts are a global frequency
-  view of the store. A missing index degrades to "everything has 0 hits"
+  view of the store. A missing OR unreadable index — including a schema a future kache no longer
+  matches (rbs is tested against kache 0.14.x) — degrades to "everything has
+  0 hits" with a loud warning, so eviction falls back to age-only ranking
+  instead of guessing against a drifted private schema. It also degrades to "everything has 0 hits"
   with a warning.
 
 ## Eviction policy

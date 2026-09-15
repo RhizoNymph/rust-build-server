@@ -70,8 +70,6 @@ pub struct Remote {
     pub enabled: bool,
     pub max_rtt_ms: u64,
     pub connect_timeout_ms: u64,
-    /// Empty = identical absolute paths on both hosts.
-    pub mirror_root: String,
     /// Path of the `rbs` binary on the remote host, relative to its home dir
     /// unless absolute. Non-interactive ssh shells often lack `~/.local/bin` on PATH.
     pub remote_bin: String,
@@ -84,7 +82,6 @@ impl Default for Remote {
             enabled: true,
             max_rtt_ms: 40,
             connect_timeout_ms: 3000,
-            mirror_root: String::new(),
             remote_bin: ".local/bin/rbs".into(),
         }
     }

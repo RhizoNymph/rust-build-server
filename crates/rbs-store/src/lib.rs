@@ -143,7 +143,7 @@ pub async fn run_gc(opts: GcOpts) -> anyhow::Result<GcReport> {
         "store gc starting"
     );
     let objects = gc::list_objects(&store, remote.prefix.as_deref()).await?;
-    let index = index::load_index_or_empty(&paths.index_db)?;
+    let index = index::load_index_or_empty(&paths.index_db);
     let now = Utc::now();
     let params = GcParams::from_store_config(&store_cfg, now);
     let plan = planner::plan(&objects, &index, &params);

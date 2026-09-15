@@ -18,7 +18,6 @@ host = "node0"                 # ssh destination
 enabled = true
 max_rtt_ms = 40                # above this, skip remote (slow WAN links)
 connect_timeout_ms = 3000
-mirror_root = ""               # "" = same absolute path; else prefix replacement
 remote_bin = ".local/bin/rbs"  # rbs binary on the remote (non-interactive ssh PATH lacks ~/.local/bin)
 
 [local_server]
@@ -76,8 +75,9 @@ bootstrap time", so the fleet follows the repo's pin.
 
 `shim_on_path` (default `true`) lets bootstrap append a marked block —
 `# >>> rbs shim >>>` / `export PATH="$HOME/.local/share/rbs/shim:$PATH"` /
-`# <<< rbs shim <<<` — to each host's `~/.bash_profile` (when it exists) or
-`~/.profile`. Without it a bootstrapped host has the shim installed but never on
+`# <<< rbs shim <<<` — to the profile the host's login shell reads:
+`~/.zprofile` for zsh (detected via `$SHELL`), else `~/.bash_profile` when it
+exists, else `~/.profile`. Without it a bootstrapped host has the shim installed but never on
 PATH, so its `cargo` bypasses rbs entirely; set it to `false` to manage the PATH
 line yourself and bootstrap will only print the line it would have added. See
 `docs/features/bootstrap.md`.
