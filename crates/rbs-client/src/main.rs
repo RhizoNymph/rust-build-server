@@ -73,6 +73,18 @@ enum Cmd {
     Doctor {
         #[arg(long)]
         remote: bool,
+        /// Converge this host and the remote on one toolchain for this
+        /// workspace: install it where missing and pin it in
+        /// rust-toolchain.toml. Defaults to the newest; implies --remote.
+        #[arg(
+            long,
+            value_name = "newest|oldest",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "newest",
+            value_parser = parse_sync_policy
+        )]
+        sync_toolchain: Option<rbs_setup::SyncPolicy>,
     },
     /// Garbage-collect the shared kache S3 store (size cap + LFU eviction).
     StoreGc {
@@ -96,6 +108,10 @@ enum Cmd {
 }
 
 fn parse_mode(s: &str) -> Result<Mode, String> {
+    s.parse()
+}
+
+fn parse_sync_policy(s: &str) -> Result<rbs_setup::SyncPolicy, String> {
     s.parse()
 }
 
@@ -330,8 +346,15 @@ async fn cli_main() -> anyhow::Result<i32> {
             print!("{}", rbs_setup::render_report(&report));
             Ok(if report.ok() { 0 } else { 1 })
         }
-        Cmd::Doctor { remote } => {
-            let report = rbs_setup::doctor(rbs_setup::DoctorOpts { cwd, remote })?;
+        Cmd::Doctor {
+            remote,
+            sync_toolchain,
+        } => {
+            let report = rbs_setup::doctor(rbs_setup::DoctorOpts {
+                cwd,
+                remote,
+                sync_toolchain,
+            })?;
             let width = report
                 .checks
                 .iter()

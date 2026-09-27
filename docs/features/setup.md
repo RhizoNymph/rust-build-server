@@ -64,7 +64,7 @@ existing scripts keep working; `Role::name()` always returns the new spelling.
      [--force]`; the remote's stdout is echoed. The server role ignores
      `--remote-host` with a warning (no recursion). For more than one client,
      use `rbs bootstrap` instead of repeating this by hand.
-- `rbs doctor [--remote]` → `rbs_setup::doctor(DoctorOpts{cwd, remote}) -> DoctorReport`.
+- `rbs doctor [--remote] [--sync-toolchain[=newest|oldest]]` → `rbs_setup::doctor(DoctorOpts{cwd, remote, sync_toolchain}) -> DoctorReport`.
   Each check is a `Check{name, ok, detail}`; `DoctorReport::ok()` is the AND.
   A command that fails or cannot be spawned is a failed check with its stderr
   in `detail` — never a panic or an `Err`.
@@ -80,6 +80,8 @@ existing scripts keep working; `Role::name()` always returns the new spelling.
   | `remote-ssh` (`--remote`) | `ssh -o BatchMode=yes -o ConnectTimeout=3 <host> true` succeeds; detail has the RTT in ms. Failure marks `remote-rbs`/`remote-toolchain` as skipped+failed. |
   | `remote-rbs` | `ssh <host> <remote_bin> --version` succeeds (detail = version); `remote_bin` from `[remote]` (default `.local/bin/rbs`) |
   | `remote-toolchain` | `ssh <host> 'cd <cwd> && rustc -vV'` parsed with `rbs_toolchain::parse_rustc_vv` is `compatible_with` the local fingerprint. Contract-aware, like the shim: a mismatch fails only when `<cwd>` has a `rust-toolchain.toml` (a broken contract); in an unpinned directory differing defaults are reported as ok with a note that remote builds from there fall back locally. Detail always lists both fingerprints. |
+
+  | `toolchain-sync` (`--sync-toolchain`, implies `--remote`) | the local and remote toolchains for `cwd` are compatible, or were made so: the newest (default) or oldest of the two is installed where missing, verified with `rustc +<ch> -vV` on both, pinned in the nearest `rust-toolchain.toml` (created in `cwd` when unpinned) and copied to the remote mirror. On success `remote-toolchain` reports the synced state. See `docs/features/toolchain-sync.md`. |
 
   `<host>` is `cfg.remote.host` from the layered rbs config for `cwd`.
 
@@ -110,8 +112,9 @@ test spawns a process, reads the real `$HOME`, or touches the network.
 - `crates/rbs-setup/src/setup.rs` — steps 1–5, `SetupError`, `generate_config`,
   `kache_config`, `render_unit`, `line_diff`, `aws_credentials_with_profile`.
 - `crates/rbs-setup/src/doctor.rs` — check table above.
+- `crates/rbs-setup/src/toolchain_sync/` — `--sync-toolchain` (see `docs/features/toolchain-sync.md`).
 - `crates/rbs-setup/src/testing.rs` (cfg(test)) — `FakeRunner`, `TempHome`.
-- `crates/rbs-setup/src/{setup_tests,doctor_tests}.rs` — 34 tests.
+- `crates/rbs-setup/src/{setup_tests,doctor_tests}.rs` — doctor tests include the `--sync-toolchain` end-to-end scenarios.
 - `deploy/systemd/rbs-server.service` — unit template (`ExecStart={self_exe} server`,
   `Restart=on-failure`, `Environment=RBS_LOG=info`, `WantedBy=default.target`).
 - `deploy/systemd/rbs-store-gc.service`, `deploy/systemd/rbs-store-gc.timer` —
@@ -133,6 +136,8 @@ test spawns a process, reads the real `$HOME`, or touches the network.
   them via `KACHE_S3_ENDPOINT` / `KACHE_S3_BUCKET` in `minio.env`.
 - `doctor` exit code is non-zero if any check fails (agents can gate on it);
   the binary decides that from `DoctorReport::ok()`.
+- `doctor` is read-only except under `--sync-toolchain`, which may install
+  toolchains on both hosts and write the workspace's toolchain file.
 - `doctor` fingerprints the local toolchain through the `Runner` (same logic as
   `rbs_toolchain::fingerprint`) so it stays hermetic; the remote fingerprint
   only carries `rustc_commit`/`rustc_version`/`host`, which is all

@@ -91,6 +91,8 @@ One client + one server:
 rbs setup --role client --remote-host <server>   # provisions this machine and the server
 export PATH="$HOME/.local/share/rbs/shim:$PATH"  # put in agent environments / shell rc
 rbs doctor --remote                              # verify everything
+rbs doctor --sync-toolchain                      # toolchains differ? pin the newest in rust-toolchain.toml
+rbs doctor --sync-toolchain=oldest               # ...or the oldest
 ```
 
 A whole fleet: describe it once in `~/.config/rbs/config.toml` and provision

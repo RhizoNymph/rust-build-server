@@ -25,7 +25,9 @@ Overview:
     setup: >
       `rbs setup` installs systemd user units (server on both hosts, kache
       daemon), writes kache config for the shared S3 store, and verifies
-      everything with `rbs doctor`.
+      everything with `rbs doctor`; `rbs doctor --sync-toolchain` also
+      reconciles a local/remote toolchain mismatch by pinning the newest (or
+      oldest) of the two.
     bootstrap: >
       `rbs bootstrap` drives setup across the whole fleet (one server, N
       clients) over ssh: pushes binaries, ensures the pinned toolchain, the
@@ -94,6 +96,15 @@ Features Index:
     entry_points: ["rbs setup", "rbs doctor", deploy/]
     depends_on: [config, client]
     doc: docs/features/setup.md
+  toolchain_sync:
+    description: >
+      `rbs doctor --sync-toolchain[=newest|oldest]`: reconcile a local/remote
+      toolchain mismatch for a workspace by installing the newest (default)
+      or oldest of the two where missing, verifying both hosts resolve the
+      same rustc build, and pinning it in rust-toolchain.toml.
+    entry_points: ["rbs doctor --sync-toolchain", crates/rbs-setup/src/toolchain_sync/mod.rs]
+    depends_on: [setup, toolchain]
+    doc: docs/features/toolchain-sync.md
   bootstrap:
     description: >
       Provision or upgrade every host of the fleet (one server, N clients)

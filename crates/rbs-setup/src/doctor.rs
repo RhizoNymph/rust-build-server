@@ -10,7 +10,11 @@ use tracing::debug;
 use crate::paths::Paths;
 use crate::runner::{Output, Runner, RunnerError};
 use crate::setup::kache_stats_has_remote;
+use crate::toolchain_sync::{self, Outcome, Probe, SyncPolicy, commit_date};
 use crate::{Check, DoctorOpts, DoctorReport};
+
+/// Name of the check `--sync-toolchain` reports under.
+const SYNC_CHECK: &str = "toolchain-sync";
 
 pub const REQUIRED_BINARIES: [&str; 7] = [
     "rbs",
@@ -57,37 +61,46 @@ fn run(
 
 /// Fingerprint the toolchain active in `cwd` through the runner (mirrors
 /// `rbs_toolchain::fingerprint` but stays hermetic).
-fn local_fingerprint(runner: &dyn Runner, cwd: &Path) -> Result<ToolchainFingerprint, String> {
-    let vv =
-        parse_rustc_vv(&run(runner, Some(cwd), "rustc", &["-vV"])?).map_err(|e| e.to_string())?;
+fn local_fingerprint(runner: &dyn Runner, cwd: &Path) -> Result<Probe, String> {
+    let out = run(runner, Some(cwd), "rustc", &["-vV"])?;
+    let vv = parse_rustc_vv(&out).map_err(|e| e.to_string())?;
     let cargo_version = run(runner, Some(cwd), "cargo", &["-V"])?.trim().to_string();
     let toolchain_name = run(runner, Some(cwd), "rustup", &["show", "active-toolchain"])
         .map(|s| s.split_whitespace().next().unwrap_or_default().to_string())
         .unwrap_or_default();
-    Ok(ToolchainFingerprint {
-        rustc_commit: vv.commit_hash,
-        rustc_version: vv.release,
-        host: vv.host,
-        cargo_version,
-        toolchain_name,
+    Ok(Probe {
+        fp: ToolchainFingerprint {
+            rustc_commit: vv.commit_hash,
+            rustc_version: vv.release,
+            host: vv.host,
+            cargo_version,
+            toolchain_name,
+        },
+        commit_date: commit_date(&out),
     })
 }
 
-fn remote_fingerprint(
-    runner: &dyn Runner,
-    host: &str,
-    cwd: &Path,
-) -> Result<ToolchainFingerprint, String> {
+fn remote_fingerprint(runner: &dyn Runner, host: &str, cwd: &Path) -> Result<Probe, String> {
     let cmd = format!("cd {} && rustc -vV", cwd.display());
-    let vv =
-        parse_rustc_vv(&run(runner, None, "ssh", &[host, &cmd])?).map_err(|e| e.to_string())?;
-    Ok(ToolchainFingerprint {
-        rustc_commit: vv.commit_hash,
-        rustc_version: vv.release,
-        host: vv.host,
-        cargo_version: String::new(),
-        toolchain_name: String::new(),
+    let out = run(runner, None, "ssh", &[host, &cmd])?;
+    let vv = parse_rustc_vv(&out).map_err(|e| e.to_string())?;
+    Ok(Probe {
+        fp: ToolchainFingerprint {
+            rustc_commit: vv.commit_hash,
+            rustc_version: vv.release,
+            host: vv.host,
+            cargo_version: String::new(),
+            toolchain_name: String::new(),
+        },
+        commit_date: commit_date(&out),
     })
+}
+
+/// Push a skipped `toolchain-sync` check when a sync was requested.
+fn skip_sync(sync: Option<SyncPolicy>, why: &str, checks: &mut Vec<Check>) {
+    if sync.is_some() {
+        checks.push(check(SYNC_CHECK, false, format!("skipped: {why}")));
+    }
 }
 
 fn remote_checks(
@@ -95,7 +108,8 @@ fn remote_checks(
     host: &str,
     remote_bin: &str,
     cwd: &Path,
-    local: Option<&ToolchainFingerprint>,
+    local: Option<&Probe>,
+    sync: Option<SyncPolicy>,
     checks: &mut Vec<Check>,
 ) {
     let started = Instant::now();
@@ -123,6 +137,7 @@ fn remote_checks(
             checks.push(check("remote-ssh", false, format!("ssh {host}: {e}")));
             checks.push(check("remote-rbs", false, "skipped: ssh unreachable"));
             checks.push(check("remote-toolchain", false, "skipped: ssh unreachable"));
+            skip_sync(sync, "ssh unreachable", checks);
             return;
         }
     }
@@ -141,17 +156,48 @@ fn remote_checks(
             false,
             "skipped: local toolchain unknown",
         ));
+        skip_sync(sync, "local toolchain unknown", checks);
         return;
     };
-    match remote_fingerprint(runner, host, cwd) {
-        Ok(remote) if local.compatible_with(&remote) => {
+    let remote = match remote_fingerprint(runner, host, cwd) {
+        Ok(remote) => remote,
+        Err(e) => {
+            checks.push(check("remote-toolchain", false, format!("{host}: {e}")));
+            skip_sync(sync, "remote toolchain unknown", checks);
+            return;
+        }
+    };
+    if let Some(policy) = sync {
+        match toolchain_sync::sync(runner, host, cwd, policy, local, &remote) {
+            Ok(Outcome::AlreadyInSync) => checks.push(check(
+                SYNC_CHECK,
+                true,
+                format!("already in sync: {}", local.fp),
+            )),
+            Ok(Outcome::Synced(s)) => {
+                checks.push(check(SYNC_CHECK, true, s.describe(host)));
+                checks.push(check(
+                    "remote-toolchain",
+                    true,
+                    format!("in sync after --sync-toolchain: {host}: {}", s.remote),
+                ));
+                return;
+            }
+            // Fall through: the contract-aware check still describes the
+            // mismatch as it stands.
+            Err(e) => checks.push(check(SYNC_CHECK, false, e.to_string())),
+        }
+    }
+    let (local, remote) = (&local.fp, remote.fp);
+    match remote {
+        remote if local.compatible_with(&remote) => {
             checks.push(check("remote-toolchain", true, format!("{host}: {remote}")));
         }
         // Contract-aware, matching the shim: a mismatch is only a failure when
         // the directory declares a toolchain, because only then was there a
         // contract to break. In an unpinned directory the hosts' defaults are
         // free to differ; remote builds from here simply fall back locally.
-        Ok(remote) => {
+        remote => {
             let pinned = rbs_toolchain::find_toolchain_file(cwd).is_some();
             let detail = if pinned {
                 format!(
@@ -167,7 +213,6 @@ fn remote_checks(
             };
             checks.push(check("remote-toolchain", !pinned, detail));
         }
-        Err(e) => checks.push(check("remote-toolchain", false, format!("{host}: {e}"))),
     }
 }
 
@@ -256,9 +301,9 @@ pub fn doctor_with(
     });
 
     let local = match local_fingerprint(runner, &opts.cwd) {
-        Ok(fp) => {
-            checks.push(check("toolchain", true, fp.to_string()));
-            Some(fp)
+        Ok(probe) => {
+            checks.push(check("toolchain", true, probe.fp.to_string()));
+            Some(probe)
         }
         Err(e) => {
             checks.push(check(
@@ -270,13 +315,15 @@ pub fn doctor_with(
         }
     };
 
-    if opts.remote {
+    // A sync compares against the remote, so requesting one implies --remote.
+    if opts.remote || opts.sync_toolchain.is_some() {
         remote_checks(
             runner,
             &cfg.remote.host,
             &cfg.remote.remote_bin,
             &opts.cwd,
             local.as_ref(),
+            opts.sync_toolchain,
             &mut checks,
         );
     }
