@@ -3,7 +3,9 @@
 ## Scope
 Compute a `ToolchainFingerprint` for a workspace directory on the current host
 and compare two fingerprints, producing a loud, structured error. Non-scope:
-installing toolchains.
+installing toolchains or reconciling a mismatch — that is
+`rbs doctor --sync-toolchain` (`docs/features/toolchain-sync.md`) and
+`rbs bootstrap`'s toolchain step.
 
 ## Flow
 1. In `cwd`, run `rustc -vV` (via rustup proxy so `rust-toolchain.toml` is honoured) → parse `release`, `commit-hash`, `host`.

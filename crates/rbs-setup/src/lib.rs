@@ -10,6 +10,7 @@ pub mod runner;
 mod setup;
 #[cfg(test)]
 mod testing;
+mod toolchain_sync;
 
 #[cfg(test)]
 mod bootstrap_tests;
@@ -32,6 +33,7 @@ pub use setup::{
     KACHE_CONFIG_DEFAULT, STORE_GC_TIMER, SetupError, generate_config, render_store_gc_service,
     render_unit, setup_with,
 };
+pub use toolchain_sync::{SyncError, SyncPolicy};
 
 /// What a host does in the fleet. Topology, not hardware: one `Server`, N
 /// `Client`s. `laptop` / `node0` are accepted as legacy aliases.
@@ -87,6 +89,9 @@ pub struct DoctorOpts {
     pub cwd: PathBuf,
     /// Probe the remote host too (ssh round trip).
     pub remote: bool,
+    /// Converge this host and the remote on one toolchain for `cwd`
+    /// (install where missing, pin in rust-toolchain.toml). Implies `remote`.
+    pub sync_toolchain: Option<SyncPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

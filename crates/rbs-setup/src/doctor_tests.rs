@@ -4,7 +4,7 @@ use rbs_config::Config;
 
 use crate::doctor::{REQUIRED_BINARIES, doctor_with};
 use crate::testing::{FakeRunner, TempHome};
-use crate::{DoctorOpts, DoctorReport};
+use crate::{DoctorOpts, DoctorReport, SyncPolicy};
 
 const VV_A: &str = "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e0a1b2c3d4e5f60718293a4b5c6d7e8f\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 21.1.0\n";
 const VV_B: &str = "rustc 1.96.0 (abcdef123 2026-06-01)\nbinary: rustc\ncommit-hash: abcdef1234567890\ncommit-date: 2026-06-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 21.1.0\n";
@@ -87,6 +87,7 @@ fn local_opts(th: &TempHome) -> DoctorOpts {
     DoctorOpts {
         cwd: th.paths.home.clone(),
         remote: false,
+        sync_toolchain: None,
     }
 }
 
@@ -296,4 +297,321 @@ fn report_ok_is_all_checks() {
         detail: "x".into(),
     });
     assert!(!rep.ok());
+}
+
+// ------------------------------------------------------------ --sync-toolchain
+
+const LIST_A: &str = "1.95.0-x86_64-unknown-linux-gnu (default)\n";
+const LIST_B: &str = "stable-x86_64-unknown-linux-gnu (default)\n";
+
+fn login(cmd: &str) -> Vec<String> {
+    crate::login_shell_args("node0", cmd)
+}
+
+fn strs(v: &[String]) -> Vec<&str> {
+    v.iter().map(String::as_str).collect()
+}
+
+fn pin_of(cwd: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cwd.join("rust-toolchain.toml")).ok()?;
+    crate::parse_toolchain_channel(&text)
+}
+
+/// Local on 1.95.0 (VV_A), node0 on 1.96.0 (VV_B), unpinned, every rustup
+/// command scripted to succeed; `+1.95.0`/`+1.96.0` resolve to VV_A/VV_B on
+/// both sides.
+fn diverged_runner(cwd: &Path) -> FakeRunner {
+    let pin = cwd.join("rust-toolchain.toml");
+    green_runner(cwd)
+        .ok_args("ssh", &["node0", &remote_cmd(cwd)], VV_B)
+        .ok_args("rustup", &["toolchain", "list"], LIST_A)
+        .ok_args(
+            "rustup",
+            &["toolchain", "install", "1.96.0", "--profile", "minimal"],
+            "",
+        )
+        .ok_args(
+            "rustup",
+            &["toolchain", "install", "1.95.0", "--profile", "minimal"],
+            "",
+        )
+        .ok_args("rustc", &["+1.95.0", "-vV"], VV_A)
+        .ok_args("rustc", &["+1.96.0", "-vV"], VV_B)
+        .ok_args("ssh", &strs(&login("rustup toolchain list")), LIST_B)
+        .ok_args(
+            "ssh",
+            &strs(&login("rustup toolchain install 1.96.0 --profile minimal")),
+            "",
+        )
+        .ok_args(
+            "ssh",
+            &strs(&login("rustup toolchain install 1.95.0 --profile minimal")),
+            "",
+        )
+        .ok_args("ssh", &strs(&login("rustc +1.95.0 -vV")), VV_A)
+        .ok_args("ssh", &strs(&login("rustc +1.96.0 -vV")), VV_B)
+        .ok_args(
+            "ssh",
+            &[
+                "node0",
+                "test",
+                "-d",
+                &crate::shell_quote(&cwd.display().to_string()),
+            ],
+            "",
+        )
+        .ok_args(
+            "scp",
+            &[
+                "-q",
+                &pin.display().to_string(),
+                &format!("node0:{}", pin.display()),
+            ],
+            "",
+        )
+}
+
+fn sync_opts(th: &TempHome, policy: SyncPolicy) -> DoctorOpts {
+    DoctorOpts {
+        cwd: th.paths.home.clone(),
+        remote: true,
+        sync_toolchain: Some(policy),
+    }
+}
+
+#[test]
+fn sync_newest_installs_locally_and_pins() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = diverged_runner(&cwd);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(s.ok, "{}", s.detail);
+    assert!(s.detail.contains("1.96.0"), "{}", s.detail);
+    assert!(s.detail.contains("newest"), "{}", s.detail);
+    assert_eq!(pin_of(&cwd).as_deref(), Some("1.96.0"));
+    assert!(r.called_with(
+        "rustup",
+        &["toolchain", "install", "1.96.0", "--profile", "minimal"]
+    ));
+    assert!(
+        r.called_with(
+            "ssh",
+            &strs(&login("rustup toolchain install 1.96.0 --profile minimal"))
+        ),
+        "node0 has 1.96.0 only as `stable`, so the exact pin is installed there too"
+    );
+    let pin = cwd.join("rust-toolchain.toml");
+    assert!(r.called_with(
+        "scp",
+        &[
+            "-q",
+            &pin.display().to_string(),
+            &format!("node0:{}", pin.display())
+        ]
+    ));
+    let rt = check(&rep, "remote-toolchain");
+    assert!(rt.ok, "{}", rt.detail);
+    assert!(rep.ok(), "{:?}", rep.checks);
+}
+
+#[test]
+fn sync_oldest_installs_on_remote_only() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = diverged_runner(&cwd);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Oldest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(s.ok, "{}", s.detail);
+    assert!(s.detail.contains("oldest"), "{}", s.detail);
+    assert_eq!(pin_of(&cwd).as_deref(), Some("1.95.0"));
+    assert!(
+        r.calls_to("rustup")
+            .iter()
+            .all(|a| a.get(1).map(String::as_str) != Some("install")),
+        "1.95.0 is already installed locally: {:?}",
+        r.calls_to("rustup")
+    );
+    assert!(r.called_with(
+        "ssh",
+        &strs(&login("rustup toolchain install 1.95.0 --profile minimal"))
+    ));
+    assert!(rep.ok(), "{:?}", rep.checks);
+}
+
+#[test]
+fn sync_when_already_in_sync_changes_nothing() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = green_runner(&cwd);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(s.ok, "{}", s.detail);
+    assert!(s.detail.contains("already in sync"), "{}", s.detail);
+    assert_eq!(pin_of(&cwd), None, "no pin written");
+    assert!(r.calls_to("scp").is_empty());
+    assert!(rep.ok(), "{:?}", rep.checks);
+}
+
+#[test]
+fn sync_implies_remote() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = diverged_runner(&cwd);
+    let mut o = sync_opts(&g.th, SyncPolicy::Newest);
+    o.remote = false;
+    let rep = doctor_with(&r, &g.th.paths, &g.cfg, &o).expect("doctor");
+    assert!(check(&rep, "remote-ssh").ok);
+    assert!(check(&rep, "toolchain-sync").ok);
+}
+
+#[test]
+fn sync_install_failure_fails_and_leaves_pin_alone() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = diverged_runner(&cwd).fail_args(
+        "ssh",
+        &strs(&login("rustup toolchain install 1.95.0 --profile minimal")),
+        1,
+        "error: no disk space",
+    );
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Oldest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(!s.ok);
+    assert!(s.detail.contains("no disk space"), "{}", s.detail);
+    assert!(s.detail.contains("node0"), "{}", s.detail);
+    assert_eq!(
+        pin_of(&cwd),
+        None,
+        "pin is only written once both hosts have the toolchain"
+    );
+    // The ordinary contract-aware check still reports the (unpinned) mismatch.
+    assert!(check(&rep, "remote-toolchain").detail.contains("unpinned"));
+    assert!(!rep.ok());
+}
+
+#[test]
+fn sync_updates_an_existing_pin() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    std::fs::write(
+        cwd.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\ncomponents = [\"clippy\"]\n",
+    )
+    .expect("write");
+    let r = diverged_runner(&cwd);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    assert!(check(&rep, "toolchain-sync").ok);
+    let text = std::fs::read_to_string(cwd.join("rust-toolchain.toml")).expect("read");
+    assert_eq!(
+        text,
+        "[toolchain]\nchannel = \"1.96.0\"\ncomponents = [\"clippy\"]\n"
+    );
+    assert!(rep.ok(), "{:?}", rep.checks);
+}
+
+#[test]
+fn sync_skips_pin_push_when_remote_dir_is_not_mirrored_yet() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = diverged_runner(&cwd).fail_args(
+        "ssh",
+        &[
+            "node0",
+            "test",
+            "-d",
+            &crate::shell_quote(&cwd.display().to_string()),
+        ],
+        1,
+        "",
+    );
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(s.ok, "{}", s.detail);
+    assert!(s.detail.contains("next remote build"), "{}", s.detail);
+    assert!(r.calls_to("scp").is_empty());
+}
+
+#[test]
+fn sync_fails_when_verification_disagrees() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    // node0's `+1.96.0` is some other build of 1.96.0.
+    let other = VV_B.replace("abcdef1234567890", "0123456789abcdef");
+    let r = diverged_runner(&cwd).ok_args("ssh", &strs(&login("rustc +1.96.0 -vV")), &other);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(!s.ok);
+    assert!(s.detail.contains("012345678"), "{}", s.detail);
+    assert!(!rep.ok());
+}
+
+#[test]
+fn sync_skipped_when_ssh_unreachable() {
+    let g = green();
+    let r = diverged_runner(&g.th.paths.home).fail_args(
+        "ssh",
+        &[
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=3",
+            "node0",
+            "true",
+        ],
+        255,
+        "no route",
+    );
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(!s.ok);
+    assert!(s.detail.contains("skipped"), "{}", s.detail);
 }
