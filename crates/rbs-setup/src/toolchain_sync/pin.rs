@@ -20,17 +20,34 @@ pub fn write_pin(cwd: &Path, channel: &str) -> Result<PathBuf, SyncError> {
         return Ok(path);
     };
     let text = std::fs::read_to_string(&path).map_err(io(&path))?;
-    let legacy_plain = path.file_name().is_some_and(|n| n == "rust-toolchain")
-        && text.trim().lines().count() <= 1
-        && !text.contains('[')
-        && !text.contains('=');
-    let new = if legacy_plain {
+    let new = if is_legacy_plain(&path, &text) {
         format!("{channel}\n")
     } else {
         set_channel(&text, channel)?
     };
     std::fs::write(&path, new).map_err(io(&path))?;
     Ok(path)
+}
+
+/// The channel pinned for `cwd`, if any: the nearest toolchain file's
+/// `[toolchain] channel`, or the single line of a legacy plain
+/// `rust-toolchain`. `None` when unpinned, unreadable, or pinned to a `path`.
+pub fn pinned_channel(cwd: &Path) -> Option<String> {
+    let path = rbs_toolchain::find_toolchain_file(cwd)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    if is_legacy_plain(&path, &text) {
+        Some(text.trim().to_string()).filter(|c| !c.is_empty())
+    } else {
+        parse_toolchain_channel(&text)
+    }
+}
+
+/// A legacy `rust-toolchain` holding just a channel name rather than TOML.
+fn is_legacy_plain(path: &Path, text: &str) -> bool {
+    path.file_name().is_some_and(|n| n == "rust-toolchain")
+        && text.trim().lines().count() <= 1
+        && !text.contains('[')
+        && !text.contains('=')
 }
 
 /// Set `[toolchain] channel` in TOML `text`, leaving every other line as is.

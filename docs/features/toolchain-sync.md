@@ -20,8 +20,13 @@ rbs doctor --sync-toolchain[=P]      (implies --remote; P defaults to newest)
     local_fingerprint(cwd)  → Probe{fp, commit_date}   (rustc -vV, cargo -V, rustup show active-toolchain)
     remote_checks
       ssh reachable? no  → toolchain-sync FAIL "skipped: ssh unreachable"
-      remote_fingerprint  → Probe (ssh host 'cd <cwd> && rustc -vV')
-      toolchain_sync::sync(runner, host, cwd, P, local, remote)
+      remote_fingerprint  → (Probe, RemoteView)
+        ssh host 'cd <cwd> && rustc -vV'                  → RemoteView::Mirror
+        fails and `ssh host test -d <cwd>` also fails (no mirror yet):
+          workspace pinned to C → ssh host rustc +C -vV   → RemoteView::Pinned(C)
+          unpinned              → ssh host rustc -vV      → RemoteView::Default
+        fails but the directory exists → error (rustc itself is broken there)
+      toolchain_sync::sync(runner, host, cwd, P, local, remote, view)
         1. compatible (commit + triple)?          → Outcome::AlreadyInSync, nothing touched
         2. release::choose(P)                     → Target{winner, release}
              refuse: different triples (HostTripleMismatch), equal order with
@@ -29,7 +34,8 @@ rbs doctor --sync-toolchain[=P]      (implies --remote; P defaults to newest)
         3. release::pin_channel                   → channel string
              stable        → exact "X.Y.Z" (the winner's rustup name is ignored)
              beta/nightly  → winner's dated rustup name ("nightly-YYYY-MM-DD");
-                             remote name via login shell `cd <cwd> && rustup show active-toolchain`;
+                             remote name via login shell `cd <cwd> && rustup show active-toolchain`
+                             (Default view: from the remote's home; Pinned view: the pin itself);
                              floating names refused (FloatingChannel)
         4. ensure_installed on local, then remote (login shell):
              `rustup toolchain list` → `rustup toolchain install <ch> --profile minimal` if absent
@@ -48,12 +54,13 @@ version `(major, minor, patch)` numerically, then channel
 `nightly < beta < stable`, then `commit-date`.
 
 ## Files
-- `crates/rbs-setup/src/toolchain_sync/mod.rs` — `sync(runner, host, cwd, policy, &Probe, &Probe) -> Result<Outcome, SyncError>`,
-  `Probe`, `Outcome::{AlreadyInSync, Synced(Box<Synced>)}`, `Synced::describe`, `SyncError` (thiserror),
+- `crates/rbs-setup/src/toolchain_sync/mod.rs` — `sync(runner, host, cwd, policy, &Probe, &Probe, &RemoteView) -> Result<Outcome, SyncError>`,
+  `Probe`, `RemoteView::{Mirror, Pinned, Default}` (+ `note`), `Outcome::{AlreadyInSync, Synced(Box<Synced>)}`, `Synced::describe`, `SyncError` (thiserror),
   install/verify/push helpers over the injectable `Runner`.
 - `crates/rbs-setup/src/toolchain_sync/release.rs` — `SyncPolicy` (`FromStr` newest|oldest, default newest),
   `Channel`, `Release::parse`, `commit_date(rustc_vv)`, `choose`, `pin_channel`, `Winner`, `Target`.
-- `crates/rbs-setup/src/toolchain_sync/pin.rs` — `write_pin(cwd, channel) -> PathBuf`, `set_channel(text, channel)`.
+- `crates/rbs-setup/src/toolchain_sync/pin.rs` — `write_pin(cwd, channel) -> PathBuf`, `set_channel(text, channel)`,
+  `pinned_channel(cwd) -> Option<String>`.
 - `crates/rbs-setup/src/toolchain_sync/{release_tests,pin_tests}.rs` — unit tests; end-to-end doctor
   scenarios live at the bottom of `crates/rbs-setup/src/doctor_tests.rs`.
 - `crates/rbs-setup/src/doctor.rs` — `toolchain-sync` check wiring; `local_fingerprint`/`remote_fingerprint` return `Probe`.
@@ -61,6 +68,11 @@ version `(major, minor, patch)` numerically, then channel
 - `crates/rbs-client/src/main.rs` — `--sync-toolchain[=newest|oldest]` (`require_equals`, `default_missing_value = "newest"`).
 
 ## Invariants
+- A workspace the remote has never mirrored is probed as a remote build would
+  resolve it after rsync: the pinned channel, else the remote default. The
+  `remote-toolchain` detail says so (`no mirror of <cwd> on <host> yet; …`).
+  A directory that exists remotely but whose `rustc` fails is still an error,
+  never masked by the fallback.
 - Nothing is written unless both hosts have the channel installed **and** `rustc +<ch> -vV` agrees on
   commit + triple. A failed sync never leaves a pin that one host cannot satisfy.
 - The pin edit touches only `channel` inside `[toolchain]`; every other line is kept. The result is

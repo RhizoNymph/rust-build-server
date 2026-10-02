@@ -7,10 +7,11 @@ use rbs_config::Config;
 use rbs_toolchain::{ToolchainFingerprint, parse_rustc_vv};
 use tracing::debug;
 
+use crate::bootstrap::shell_quote;
 use crate::paths::Paths;
 use crate::runner::{Output, Runner, RunnerError};
 use crate::setup::kache_stats_has_remote;
-use crate::toolchain_sync::{self, Outcome, Probe, SyncPolicy, commit_date};
+use crate::toolchain_sync::{self, Outcome, Probe, RemoteView, SyncPolicy, commit_date};
 use crate::{Check, DoctorOpts, DoctorReport};
 
 /// Name of the check `--sync-toolchain` reports under.
@@ -80,11 +81,34 @@ fn local_fingerprint(runner: &dyn Runner, cwd: &Path) -> Result<Probe, String> {
     })
 }
 
-fn remote_fingerprint(runner: &dyn Runner, host: &str, cwd: &Path) -> Result<Probe, String> {
+/// Fingerprint `host`'s toolchain for `cwd`. Probed inside the remote's
+/// mirror when it has one; otherwise as a remote build would resolve it once
+/// rsync creates the mirror: the workspace's pinned channel, else the
+/// remote's default.
+fn remote_fingerprint(
+    runner: &dyn Runner,
+    host: &str,
+    cwd: &Path,
+) -> Result<(Probe, RemoteView), String> {
     let cmd = format!("cd {} && rustc -vV", cwd.display());
-    let out = run(runner, None, "ssh", &[host, &cmd])?;
+    let (out, view) = match run(runner, None, "ssh", &[host, &cmd]) {
+        Ok(out) => (out, RemoteView::Mirror),
+        // The directory exists, so the failure is rustc's own: report it.
+        Err(e) if remote_dir_exists(runner, host, cwd) => return Err(e),
+        Err(_) => match toolchain_sync::pinned_channel(cwd) {
+            Some(channel) => {
+                let plus = format!("+{channel}");
+                let out = run(runner, None, "ssh", &[host, "rustc", &plus, "-vV"])?;
+                (out, RemoteView::Pinned(channel))
+            }
+            None => (
+                run(runner, None, "ssh", &[host, "rustc", "-vV"])?,
+                RemoteView::Default,
+            ),
+        },
+    };
     let vv = parse_rustc_vv(&out).map_err(|e| e.to_string())?;
-    Ok(Probe {
+    let probe = Probe {
         fp: ToolchainFingerprint {
             rustc_commit: vv.commit_hash,
             rustc_version: vv.release,
@@ -93,7 +117,18 @@ fn remote_fingerprint(runner: &dyn Runner, host: &str, cwd: &Path) -> Result<Pro
             toolchain_name: String::new(),
         },
         commit_date: commit_date(&out),
-    })
+    };
+    Ok((probe, view))
+}
+
+/// Does `cwd` exist on `host`? An ssh failure counts as "exists" so the
+/// original probe error is reported rather than masked by a fallback.
+fn remote_dir_exists(runner: &dyn Runner, host: &str, cwd: &Path) -> bool {
+    let dir = shell_quote(&cwd.display().to_string());
+    match runner.run("ssh", &[host, "test", "-d", &dir]) {
+        Ok(out) => out.success(),
+        Err(_) => true,
+    }
 }
 
 /// Push a skipped `toolchain-sync` check when a sync was requested.
@@ -159,8 +194,8 @@ fn remote_checks(
         skip_sync(sync, "local toolchain unknown", checks);
         return;
     };
-    let remote = match remote_fingerprint(runner, host, cwd) {
-        Ok(remote) => remote,
+    let (remote, view) = match remote_fingerprint(runner, host, cwd) {
+        Ok(probed) => probed,
         Err(e) => {
             checks.push(check("remote-toolchain", false, format!("{host}: {e}")));
             skip_sync(sync, "remote toolchain unknown", checks);
@@ -168,7 +203,7 @@ fn remote_checks(
         }
     };
     if let Some(policy) = sync {
-        match toolchain_sync::sync(runner, host, cwd, policy, local, &remote) {
+        match toolchain_sync::sync(runner, host, cwd, policy, local, &remote, &view) {
             Ok(Outcome::AlreadyInSync) => checks.push(check(
                 SYNC_CHECK,
                 true,
@@ -188,10 +223,18 @@ fn remote_checks(
             Err(e) => checks.push(check(SYNC_CHECK, false, e.to_string())),
         }
     }
+    let note = view
+        .note(host, cwd)
+        .map(|n| format!("\n    ({n})"))
+        .unwrap_or_default();
     let (local, remote) = (&local.fp, remote.fp);
     match remote {
         remote if local.compatible_with(&remote) => {
-            checks.push(check("remote-toolchain", true, format!("{host}: {remote}")));
+            checks.push(check(
+                "remote-toolchain",
+                true,
+                format!("{host}: {remote}{note}"),
+            ));
         }
         // Contract-aware, matching the shim: a mismatch is only a failure when
         // the directory declares a toolchain, because only then was there a
@@ -211,7 +254,11 @@ fn remote_checks(
                     cwd.display()
                 )
             };
-            checks.push(check("remote-toolchain", !pinned, detail));
+            checks.push(check(
+                "remote-toolchain",
+                !pinned,
+                format!("{detail}{note}"),
+            ));
         }
     }
 }

@@ -81,3 +81,32 @@ fn edits_legacy_file_that_holds_toml() {
     let text = std::fs::read_to_string(&legacy).expect("read");
     assert_eq!(parse_toolchain_channel(&text).as_deref(), Some("1.96.0"));
 }
+
+#[test]
+fn reads_the_pinned_channel() {
+    use super::pin::pinned_channel;
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_eq!(pinned_channel(dir.path()), None);
+    std::fs::write(dir.path().join("rust-toolchain"), "1.95.0\n").expect("write");
+    assert_eq!(pinned_channel(dir.path()).as_deref(), Some("1.95.0"));
+    let toml = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        toml.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly-2026-05-28\"\n",
+    )
+    .expect("write");
+    assert_eq!(
+        pinned_channel(toml.path()).as_deref(),
+        Some("nightly-2026-05-28")
+    );
+    std::fs::write(
+        toml.path().join("rust-toolchain.toml"),
+        "[toolchain]\npath = \"/x\"\n",
+    )
+    .expect("write");
+    assert_eq!(
+        pinned_channel(toml.path()),
+        None,
+        "a path toolchain has no channel"
+    );
+}

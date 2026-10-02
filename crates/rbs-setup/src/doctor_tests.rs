@@ -615,3 +615,170 @@ fn sync_skipped_when_ssh_unreachable() {
     assert!(!s.ok);
     assert!(s.detail.contains("skipped"), "{}", s.detail);
 }
+
+// ------------------------------------------- workspace not mirrored on remote
+
+fn no_such_dir(cwd: &Path) -> String {
+    format!(
+        "bash: line 1: cd: {}: No such file or directory",
+        cwd.display()
+    )
+}
+
+fn test_d(cwd: &Path) -> Vec<String> {
+    vec![
+        "node0".into(),
+        "test".into(),
+        "-d".into(),
+        crate::shell_quote(&cwd.display().to_string()),
+    ]
+}
+
+/// `cwd` does not exist on node0: the mirrored probe fails and `test -d` says so.
+fn unmirrored(r: FakeRunner, cwd: &Path) -> FakeRunner {
+    r.fail_args("ssh", &["node0", &remote_cmd(cwd)], 1, &no_such_dir(cwd))
+        .fail_args("ssh", &strs(&test_d(cwd)), 1, "")
+}
+
+#[test]
+fn unmirrored_unpinned_compares_against_remote_default() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r = unmirrored(green_runner(&cwd), &cwd).ok_args("ssh", &["node0", "rustc", "-vV"], VV_B);
+    let mut o = local_opts(&g.th);
+    o.remote = true;
+    let rep = doctor_with(&r, &g.th.paths, &g.cfg, &o).expect("doctor");
+    let c = check(&rep, "remote-toolchain");
+    assert!(c.ok, "unpinned mismatch is not a failure: {}", c.detail);
+    assert!(c.detail.contains("1.96.0"), "{}", c.detail);
+    assert!(c.detail.contains("no mirror"), "{}", c.detail);
+    assert!(c.detail.contains("default"), "{}", c.detail);
+}
+
+#[test]
+fn unmirrored_pinned_checks_the_pinned_channel_on_remote() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    std::fs::write(
+        cwd.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
+    )
+    .expect("write");
+    // node0's default is 1.96.0 but a mirrored build would use the pin.
+    let r = unmirrored(green_runner(&cwd), &cwd)
+        .ok_args("ssh", &["node0", "rustc", "-vV"], VV_B)
+        .ok_args("ssh", &["node0", "rustc", "+1.95.0", "-vV"], VV_A);
+    let mut o = local_opts(&g.th);
+    o.remote = true;
+    let rep = doctor_with(&r, &g.th.paths, &g.cfg, &o).expect("doctor");
+    let c = check(&rep, "remote-toolchain");
+    assert!(c.ok, "{}", c.detail);
+    assert!(c.detail.contains("1.95.0"), "{}", c.detail);
+    assert!(c.detail.contains("no mirror"), "{}", c.detail);
+    assert!(rep.ok(), "{:?}", rep.checks);
+}
+
+#[test]
+fn unmirrored_pinned_channel_missing_on_remote_fails() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    std::fs::write(
+        cwd.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
+    )
+    .expect("write");
+    let r = unmirrored(green_runner(&cwd), &cwd).fail_args(
+        "ssh",
+        &["node0", "rustc", "+1.95.0", "-vV"],
+        1,
+        "error: toolchain '1.95.0-x86_64-unknown-linux-gnu' is not installed",
+    );
+    let mut o = local_opts(&g.th);
+    o.remote = true;
+    let rep = doctor_with(&r, &g.th.paths, &g.cfg, &o).expect("doctor");
+    let c = check(&rep, "remote-toolchain");
+    assert!(!c.ok);
+    assert!(c.detail.contains("not installed"), "{}", c.detail);
+}
+
+#[test]
+fn mirrored_dir_with_failing_rustc_is_still_a_failure() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    // The directory exists on node0; rustc itself is broken there.
+    let r = green_runner(&cwd)
+        .fail_args(
+            "ssh",
+            &["node0", &remote_cmd(&cwd)],
+            127,
+            "rustc: command not found",
+        )
+        .ok_args("ssh", &strs(&test_d(&cwd)), "")
+        .ok_args("ssh", &["node0", "rustc", "-vV"], VV_A);
+    let mut o = local_opts(&g.th);
+    o.remote = true;
+    let rep = doctor_with(&r, &g.th.paths, &g.cfg, &o).expect("doctor");
+    let c = check(&rep, "remote-toolchain");
+    assert!(!c.ok);
+    assert!(c.detail.contains("command not found"), "{}", c.detail);
+}
+
+#[test]
+fn sync_works_without_a_remote_mirror() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let r =
+        unmirrored(diverged_runner(&cwd), &cwd).ok_args("ssh", &["node0", "rustc", "-vV"], VV_B);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(s.ok, "{}", s.detail);
+    assert!(s.detail.contains("1.96.0"), "{}", s.detail);
+    assert!(s.detail.contains("next remote build"), "{}", s.detail);
+    assert_eq!(pin_of(&cwd).as_deref(), Some("1.96.0"));
+    assert!(r.calls_to("scp").is_empty());
+    assert!(rep.ok(), "{:?}", rep.checks);
+}
+
+#[test]
+fn sync_without_mirror_reads_remote_nightly_name_from_home() {
+    let g = green();
+    let cwd = g.th.paths.home.clone();
+    let vv_n = "rustc 1.97.0-nightly (fedcba987 2026-05-27)\nbinary: rustc\ncommit-hash: fedcba9876543210\ncommit-date: 2026-05-27\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.0-nightly\nLLVM version: 21.1.0\n";
+    let ch = "nightly-2026-05-28";
+    let r = unmirrored(green_runner(&cwd), &cwd)
+        .ok_args("ssh", &["node0", "rustc", "-vV"], vv_n)
+        .ok_args(
+            "ssh",
+            &strs(&login("rustup show active-toolchain")),
+            "nightly-2026-05-28-x86_64-unknown-linux-gnu (default)\n",
+        )
+        .ok_args("rustup", &["toolchain", "list"], LIST_A)
+        .ok_args(
+            "rustup",
+            &["toolchain", "install", ch, "--profile", "minimal"],
+            "",
+        )
+        .ok_args("rustc", &["+nightly-2026-05-28", "-vV"], vv_n)
+        .ok_args(
+            "ssh",
+            &strs(&login("rustup toolchain list")),
+            "nightly-2026-05-28-x86_64-unknown-linux-gnu (default)\n",
+        )
+        .ok_args("ssh", &strs(&login("rustc +nightly-2026-05-28 -vV")), vv_n);
+    let rep = doctor_with(
+        &r,
+        &g.th.paths,
+        &g.cfg,
+        &sync_opts(&g.th, SyncPolicy::Newest),
+    )
+    .expect("doctor");
+    let s = check(&rep, "toolchain-sync");
+    assert!(s.ok, "{}", s.detail);
+    assert_eq!(pin_of(&cwd).as_deref(), Some(ch));
+}

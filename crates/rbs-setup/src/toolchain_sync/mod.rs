@@ -23,6 +23,7 @@ use tracing::info;
 use crate::bootstrap::{login_shell_args, shell_quote, toolchain_installed};
 use crate::runner::{Output, Runner, RunnerError};
 
+pub use pin::pinned_channel;
 use pin::write_pin;
 use release::{Channel, Winner};
 pub use release::{SyncPolicy, commit_date};
@@ -36,6 +37,33 @@ pub struct Probe {
     pub fp: ToolchainFingerprint,
     /// `commit-date` from `rustc -vV`; orders nightlies of the same version.
     pub commit_date: Option<String>,
+}
+
+/// Where the remote's toolchain for the workspace was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteView {
+    /// The remote mirrors `cwd` (same absolute path); probed inside it.
+    Mirror,
+    /// No mirror yet, and the workspace pins this channel — what a remote
+    /// build resolves once rsync brings the pin over.
+    Pinned(String),
+    /// No mirror and no pin: the remote's default toolchain.
+    Default,
+}
+
+impl RemoteView {
+    /// Report suffix explaining a probe made without a mirror.
+    pub fn note(&self, host: &str, cwd: &Path) -> Option<String> {
+        let what = match self {
+            RemoteView::Mirror => return None,
+            RemoteView::Pinned(ch) => format!("its pinned {ch}"),
+            RemoteView::Default => "its default toolchain".to_string(),
+        };
+        Some(format!(
+            "no mirror of {} on {host} yet; checked {what}",
+            cwd.display()
+        ))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -152,6 +180,7 @@ pub fn sync(
     policy: SyncPolicy,
     local: &Probe,
     remote: &Probe,
+    view: &RemoteView,
 ) -> Result<Outcome, SyncError> {
     if local.fp.compatible_with(&remote.fp) {
         return Ok(Outcome::AlreadyInSync);
@@ -161,7 +190,7 @@ pub fn sync(
         (Winner::Local, _) => (LOCAL, local.fp.toolchain_name.clone()),
         // Stable pins the release number; the rustup name is not consulted.
         (Winner::Remote, Channel::Stable) => (host, String::new()),
-        (Winner::Remote, _) => (host, remote_active_toolchain(runner, host, cwd)?),
+        (Winner::Remote, _) => (host, remote_active_toolchain(runner, host, cwd, view)?),
     };
     let channel = release::pin_channel(&target.release, &rustup_name, &local.fp.host, winner_host)?;
     info!(host, %policy, channel, winner = winner_host, "toolchain sync: target chosen");
@@ -288,11 +317,16 @@ fn remote_active_toolchain(
     runner: &dyn Runner,
     host: &str,
     cwd: &Path,
+    view: &RemoteView,
 ) -> Result<String, SyncError> {
-    let command = format!(
-        "cd {} && rustup show active-toolchain",
-        shell_quote(&cwd.display().to_string())
-    );
+    let command = match view {
+        RemoteView::Mirror => format!(
+            "cd {} && rustup show active-toolchain",
+            shell_quote(&cwd.display().to_string())
+        ),
+        RemoteView::Pinned(channel) => return Ok(channel.clone()),
+        RemoteView::Default => "rustup show active-toolchain".to_string(),
+    };
     let args = login_shell_args(host, &command);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let fail = |detail: String| SyncError::Command {
