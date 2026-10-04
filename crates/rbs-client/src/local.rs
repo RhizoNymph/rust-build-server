@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::self_spawn;
 use crate::transport::{BoxFuture, Conn, Transport, TransportError, UnixTransport};
 
 /// How long to keep retrying the socket after spawning the server.
@@ -28,7 +29,10 @@ impl LocalTransport {
             std::fs::create_dir_all(dir)?;
         }
         tracing::warn!(exe = %self.exe.display(), socket = %self.socket.display(), "autostarting local rbs server");
-        std::process::Command::new(&self.exe)
+        // argv[0] is overridden (self_spawn::command) so this child runs as
+        // the `rbs` CLI (`Cmd::Server`) even when `self.exe`'s path is the
+        // `cargo` shim hardlink — see self_spawn.rs.
+        self_spawn::command(&self.exe)
             .arg("server")
             .arg("--socket")
             .arg(&self.socket)
