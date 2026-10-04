@@ -41,6 +41,8 @@ a build ran where it did.
      remote: root = rbs_sync::workspace_root(cwd); rbs_sync::push(root, host)
              (either failing → warn, next backend); submit on the kept conn
      local:  LocalTransport.connect() (autostart: spawn `<current_exe> server --socket P`
+             via self_spawn::command (argv[0] overridden to "rbs" so this
+             lands in cli_main even if <current_exe> is the cargo shim path)
              detached — own process group, stdio null — and retry ≤3 s); Hello; submit
      plain:  exec real cargo; return
    submit streams JobEvents: Stdout→stdout, Stderr→stderr, Queued → info
@@ -57,8 +59,10 @@ a build ran where it did.
 9. store-touch trigger: when cargo policy applies, `cfg.store.touch` is true and
    argv[1] ∈ COMPILING_SUBCOMMANDS (build, test, check, clippy, doc, bench, run),
    fire-and-forget `hooks.spawn_touch(dir)` → detached
-   `<current_exe> store-touch --workspace <dir>` (own process group, stdio
-   null; spawn failure = debug log). Server-backed jobs fire it after a
+   `<current_exe> store-touch --workspace <dir>` via self_spawn::command
+   (argv[0] overridden to "rbs", same reason as the local autostart above;
+   own process group, stdio null; spawn failure = debug log). Server-backed
+   jobs fire it after a
    successful exit (dir = cwd; the remote pull-and-link path fires with the
    already-resolved root). Every locally *exec'd* cargo replaces the process,
    so those paths fire it BEFORE the exec (the detached child outlives it):
@@ -95,11 +99,12 @@ discovered later in the chain; failure there falls through like any other).
 `Decision { chain, skipped: Vec<Skip { backend, reason: SkipReason }> }`.
 
 ## Files
-- `crates/rbs-client/src/main.rs` — argv[0] dispatch, clap CLI (incl. `rbs store-touch`), logging init, `RealHooks` (production `shim::Hooks`), signal future (SIGINT/SIGTERM).
+- `crates/rbs-client/src/main.rs` — argv[0] dispatch (`invoked_as_cargo`), clap CLI (incl. `rbs store-touch`), logging init, `RealHooks` (production `shim::Hooks`; `spawn_touch` uses `self_spawn::command`), signal future (SIGINT/SIGTERM).
 - `crates/rbs-client/src/shim.rs` — `ShimInput`, `Hooks` trait (remote/local transports, fingerprint, workspace_root, push, pull, exec_local, spawn_touch, stdout, stderr, cancel_signal), `run(input, &hooks) -> i32`, `submit` (event pump + cancel forwarding), `COMPILING_SUBCOMMANDS`.
 - `crates/rbs-client/src/backend.rs` — `Backend`, `RemoteProbe`, `SkipReason`, `Decision`, `select()`.
 - `crates/rbs-client/src/transport.rs` — `Transport` / `Conn` traits (boxed futures, object-safe), `Framed<R,W>` newline-JSON duplex, `UnixTransport`, `SshTransport` (`ssh -o BatchMode=yes -o ConnectTimeout=<ceil secs> <host> rbs proxy`, child kept alive by the conn, killed on drop), `FakeTransport` (test-only: scripted replies, records sends, counts connects), `probe()`, `hello()`, `probe_with_timeout()`.
-- `crates/rbs-client/src/local.rs` — `LocalTransport` (unix socket + autostart/retry).
+- `crates/rbs-client/src/local.rs` — `LocalTransport` (unix socket + autostart/retry; autostart spawn uses `self_spawn::command`).
+- `crates/rbs-client/src/self_spawn.rs` — `command(program) -> Command`, `SAFE_ARGV0`: builds a detached self-spawn with argv[0] explicitly overridden (`CommandExt::arg0`) so the child's own `invoked_as_cargo()` is always `false`, regardless of what `program`'s file name is. Shared by `main.rs::RealHooks::spawn_touch` and `local.rs::LocalTransport::spawn_server` — both exec `self.exe`, which IS the `cargo` shim hardlink/symlink's path when the current process was itself invoked as `cargo`.
 - `crates/rbs-client/src/real_cargo.rs` — `resolve`, `find`, `command`, `exec`, `shim_active`, `SHIM_ACTIVE_ENV`.
 - `crates/rbs-client/src/status.rs` — `rbs status` probing and line formatting.
 
@@ -115,6 +120,7 @@ discovered later in the chain; failure there falls through like any other).
   `store.touch = false`.
 - `real_cargo`: PATH walk skips the shim dir, CARGO_HOME / ~/.cargo preference, non-executables ignored, env of the exec'd command.
 - `local`: fails fast without autostart, spawn failure reported, autostart connects once the (fake, python3) server listens.
+- `self_spawn`: the built `Command`'s argv[0] is the override (not the program's file name), verified by actually spawning `/bin/sh -c 'printf %s "$0"'` and reading `$0` back — including the exact bug scenario where `program`'s path is a symlink literally named `cargo`.
 - `status`: line formatting for ok / unavailable.
 
 ## Invariants
@@ -125,3 +131,4 @@ discovered later in the chain; failure there falls through like any other).
 - Toolchain mismatch is contract-aware: if the workspace has a `rust-toolchain.toml`/`rust-toolchain` file (`ShimInput.pinned`, via `rbs_toolchain::find_toolchain_file`), mismatch is a hard error with no fallback; an unpinned workspace gets a loud stderr warning ("pin the workspace to build remotely") and falls through to the next backend.
 - All fallbacks are logged at `warn` with the reason.
 - `rbs status` and the shim never contact the remote when `remote.enabled = false` or mode ∈ {local, plain}.
+- `invoked_as_cargo()` dispatch is purely on argv[0]'s file name. Every detached self-spawn of `self.exe` (store-touch after a build, local-server autostart) goes through `self_spawn::command`, which overrides argv[0] to `"rbs"` via `CommandExt::arg0`. Without this, when the running process was itself invoked as `cargo` through the shim hardlink/symlink, `self.exe`'s file name IS `cargo`, so the child's own `invoked_as_cargo()` would return `true` and it would re-enter the shim: `store-touch` got submitted as a remote/local *job* (`argv=["cargo","store-touch",…]`, failing with "could not find Cargo.toml") instead of running `Cmd::StoreTouch`, and the autostart child fell through toolchain fingerprinting instead of starting `rbs server`.
