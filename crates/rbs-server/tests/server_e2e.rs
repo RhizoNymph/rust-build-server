@@ -140,6 +140,7 @@ fn request(cwd: &Path, argv: &[&str], fp: ToolchainFingerprint) -> JobRequest {
         argv: argv.iter().map(|s| s.to_string()).collect(),
         env: BTreeMap::new(),
         toolchain: fp,
+        toolchain_override: None,
         priority: Priority::Agent,
         client: ClientIdentity {
             hostname: "test".into(),
@@ -151,7 +152,7 @@ fn request(cwd: &Path, argv: &[&str], fp: ToolchainFingerprint) -> JobRequest {
 }
 
 fn fingerprint(cwd: &Path) -> ToolchainFingerprint {
-    rbs_toolchain::fingerprint(cwd).expect("fingerprint local toolchain")
+    rbs_toolchain::fingerprint(cwd, None).expect("fingerprint local toolchain")
 }
 
 /// Collect events until the terminal one; returns (id, events).

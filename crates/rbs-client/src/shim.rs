@@ -38,12 +38,23 @@ pub struct ShimInput {
     /// error when a contract exists; unpinned workspaces fall back with a
     /// loud warning instead.
     pub pinned: bool,
+    /// Explicit `cargo +<name> …` override, parsed from `argv[1]`, without
+    /// the leading `+`. `None` when the invocation has no override.
+    ///
+    /// This is a *second*, independent source of a hard toolchain contract:
+    /// the user named a specific toolchain right there on the command line,
+    /// which is at least as strong a promise as a `rust-toolchain.toml` pin.
+    /// It is kept separate from `pinned` (which is strictly "does this
+    /// workspace have a pin file") so each field keeps one meaning; see
+    /// [`ShimInput::hard_mismatch`] for the combined rule.
+    pub toolchain_override: Option<String>,
 }
 
 impl ShimInput {
     /// Build from the process environment for `argv` (already including `argv[0]`).
     pub fn from_env(cwd: PathBuf, argv: Vec<String>, cfg: Config, cargo_policy: bool) -> Self {
         let pinned = rbs_toolchain::find_toolchain_file(&cwd).is_some();
+        let toolchain_override = toolchain_override_token(&argv).map(str::to_string);
         use std::io::IsTerminal;
         let vars: Vec<(String, String)> = std::env::vars().collect();
         let env = rbs_config::filter_env(
@@ -64,12 +75,43 @@ impl ShimInput {
             env,
             cargo_policy,
             pinned,
+            toolchain_override,
         }
     }
 
+    /// The real cargo subcommand, skipping an optional leading `+toolchain`
+    /// override token (`argv[1]`, recognized by its `+` prefix — the only
+    /// position cargo's own `+toolchain` grammar allows it in). Whatever
+    /// comes after that — the real subcommand, or a leading flag like `-v`
+    /// if one is present — is handled exactly as it already was when there
+    /// was no override: [`is_passthrough`]'s `starts_with('-')` case covers
+    /// leading flags in both the with- and without-override case alike.
     fn subcommand(&self) -> Option<&str> {
-        self.argv.get(1).map(String::as_str)
+        let start = if self.toolchain_override.is_some() {
+            2
+        } else {
+            1
+        };
+        self.argv.get(start).map(String::as_str)
     }
+
+    /// A mismatch is a hard error (no fallback) when the workspace is pinned
+    /// via `rust-toolchain.toml`/`rust-toolchain` *or* this invocation named
+    /// an explicit `+toolchain` override: either way the user (or the repo)
+    /// made a specific, binding toolchain promise, so silently falling back
+    /// to a different toolchain would violate it.
+    fn hard_mismatch(&self) -> bool {
+        self.pinned || self.toolchain_override.is_some()
+    }
+}
+
+/// `argv[1]`, if it is a `+toolchain` override (starts with `+` and has at
+/// least one character after it) — the only position cargo's `+toolchain`
+/// syntax recognizes it in; a `+` anywhere else is just a literal argument.
+fn toolchain_override_token(argv: &[String]) -> Option<&str> {
+    argv.get(1)
+        .and_then(|s| s.strip_prefix('+'))
+        .filter(|s| !s.is_empty())
 }
 
 /// Cargo subcommands that compile (and therefore use the workspace's kache
@@ -92,7 +134,14 @@ pub trait Hooks: Send + Sync {
     fn remote(&self) -> Option<Box<dyn Transport>>;
     /// `None` = no local server configured for this run.
     fn local(&self) -> Option<Box<dyn Transport>>;
-    fn fingerprint(&self, cwd: &Path) -> Result<ToolchainFingerprint, ToolchainError>;
+    /// `toolchain` is the explicit `+<name>` override from argv (without the
+    /// `+`), when the invocation had one; `None` fingerprints the
+    /// directory's own default exactly as before.
+    fn fingerprint(
+        &self,
+        cwd: &Path,
+        toolchain: Option<&str>,
+    ) -> Result<ToolchainFingerprint, ToolchainError>;
     fn workspace_root(&self, cwd: &Path)
     -> impl Future<Output = Result<PathBuf, SyncError>> + Send;
     fn push(&self, root: &Path, host: &str) -> impl Future<Output = Result<(), SyncError>> + Send;
@@ -203,7 +252,7 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
         return hooks.exec_local(&input.argv);
     }
 
-    let toolchain = match hooks.fingerprint(&input.cwd) {
+    let toolchain = match hooks.fingerprint(&input.cwd, input.toolchain_override.as_deref()) {
         Ok(fp) => fp,
         Err(e) => {
             if mode == Mode::Auto {
@@ -252,6 +301,7 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
         argv: input.argv.clone(),
         env: job_env(&input.env),
         toolchain,
+        toolchain_override: input.toolchain_override.clone(),
         priority: input.cfg.policy.priority,
         client: input.identity.clone(),
         tty: input.tty,
@@ -342,7 +392,7 @@ pub async fn run<H: Hooks>(input: ShimInput, hooks: &H) -> i32 {
                     server_host,
                     server,
                 };
-                if input.pinned {
+                if input.hard_mismatch() {
                     hooks.stderr(format!("rbs: error: {m}").as_bytes());
                     return 1;
                 }
@@ -525,6 +575,8 @@ mod tests {
         events: Vec<&'static str>,
         out: Vec<u8>,
         err: Vec<u8>,
+        /// Every `toolchain` argument `fingerprint()` was called with.
+        fingerprinted_with: Vec<Option<String>>,
     }
 
     struct TestHooks {
@@ -563,7 +615,14 @@ mod tests {
                 .clone()
                 .map(|t| Box::new(t) as Box<dyn Transport>)
         }
-        fn fingerprint(&self, _cwd: &Path) -> Result<ToolchainFingerprint, ToolchainError> {
+        fn fingerprint(
+            &self,
+            _cwd: &Path,
+            toolchain: Option<&str>,
+        ) -> Result<ToolchainFingerprint, ToolchainError> {
+            self.calls()
+                .fingerprinted_with
+                .push(toolchain.map(str::to_string));
             self.fingerprint
                 .clone()
                 .map_err(|field| ToolchainError::Parse {
@@ -613,12 +672,17 @@ mod tests {
         let mut cfg = Config::default();
         cfg.policy.mode = mode;
         cfg.remote.max_rtt_ms = 10_000;
+        let argv: Vec<String> = std::iter::once("cargo")
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect();
+        // Derive the override the same way `ShimInput::from_env` does, so
+        // tests that pass `+toolchain` in `args` get it populated for free
+        // instead of duplicating the parsing rule.
+        let toolchain_override = toolchain_override_token(&argv).map(str::to_string);
         ShimInput {
             cwd: PathBuf::from("/w"),
-            argv: std::iter::once("cargo")
-                .chain(args.iter().copied())
-                .map(String::from)
-                .collect(),
+            argv,
             cfg,
             tty: false,
             identity: ClientIdentity {
@@ -629,6 +693,7 @@ mod tests {
             env: BTreeMap::from([("RUSTFLAGS".to_string(), "-Cdebuginfo=0".to_string())]),
             cargo_policy: true,
             pinned: true,
+            toolchain_override,
         }
     }
 
@@ -1076,5 +1141,219 @@ mod tests {
         inp.argv = vec!["sh".into(), "-c".into(), "run".into()];
         assert_eq!(run(inp, &hooks).await, 0);
         assert!(hooks.calls().exec.is_empty());
+    }
+
+    // --- `+toolchain` override handling (argv[1] == "+<name>") ---
+
+    #[test]
+    fn toolchain_override_token_parses_only_in_position_one() {
+        let argv = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(
+            toolchain_override_token(&argv(&["cargo", "+stable", "build"])),
+            Some("stable")
+        );
+        assert_eq!(
+            toolchain_override_token(&argv(&["cargo", "+nightly-2026-10-02", "install"])),
+            Some("nightly-2026-10-02")
+        );
+        assert_eq!(toolchain_override_token(&argv(&["cargo", "build"])), None);
+        assert_eq!(
+            toolchain_override_token(&argv(&["cargo", "build", "+stable"])),
+            None,
+            "a `+` token after the subcommand position is not an override"
+        );
+        assert_eq!(
+            toolchain_override_token(&argv(&["cargo", "+"])),
+            None,
+            "bare `+` with nothing after it is not a valid override"
+        );
+    }
+
+    #[tokio::test]
+    async fn toolchain_override_install_is_passthrough_local() {
+        let remote = FakeTransport::scripted(vec![hello_msg("node0"), status_msg(true)]);
+        let hooks = TestHooks::new(Some(remote.clone()), Some(FakeTransport::default()));
+        let hooks = TestHooks {
+            exec_code: 9,
+            ..hooks
+        };
+        let code = run(
+            input(
+                &["+nightly-2026-10-02", "install", "--root", "/tmp/x"],
+                Mode::Auto,
+            ),
+            &hooks,
+        )
+        .await;
+        assert_eq!(
+            code, 9,
+            "must run the real cargo locally, like plain `cargo install`"
+        );
+        assert_eq!(remote.connect_count(), 0, "must never reach a backend");
+        let calls = hooks.calls();
+        assert_eq!(
+            calls.exec,
+            vec![vec![
+                "cargo".to_string(),
+                "+nightly-2026-10-02".to_string(),
+                "install".to_string(),
+                "--root".to_string(),
+                "/tmp/x".to_string(),
+            ]],
+            "the override must be forwarded to the real cargo untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn toolchain_override_run_hits_local_subcommands_bypass() {
+        let remote = FakeTransport::scripted(vec![hello_msg("node0"), status_msg(true)]);
+        let hooks = TestHooks::new(Some(remote.clone()), Some(FakeTransport::default()));
+        let hooks = TestHooks {
+            exec_code: 5,
+            ..hooks
+        };
+        let code = run(input(&["+stable", "run", "--", "x"], Mode::Auto), &hooks).await;
+        assert_eq!(code, 5);
+        assert_eq!(
+            remote.connect_count(),
+            0,
+            "local_subcommands bypass must never probe the remote"
+        );
+        assert_eq!(
+            hooks.calls().exec,
+            vec![vec![
+                "cargo".to_string(),
+                "+stable".to_string(),
+                "run".to_string(),
+                "--".to_string(),
+                "x".to_string(),
+            ]]
+        );
+    }
+
+    #[tokio::test]
+    async fn toolchain_override_build_pulls_and_links_identically_to_plain_build() {
+        let mut script = vec![hello_msg("node0"), status_msg(true)];
+        script.extend(job_events(0));
+        let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), None);
+        let code = run(
+            input(&["+stable", "build", "--release"], Mode::Auto),
+            &hooks,
+        )
+        .await;
+        assert_eq!(code, 0);
+        let calls = hooks.calls();
+        assert_eq!(
+            calls.pulls,
+            vec![PathBuf::from("/w")],
+            "must pull-and-link exactly like plain `build`"
+        );
+        assert_eq!(
+            calls.exec,
+            vec![vec![
+                "cargo".to_string(),
+                "+stable".to_string(),
+                "build".to_string(),
+                "--release".to_string(),
+            ]]
+        );
+        assert_eq!(
+            calls.fingerprinted_with,
+            vec![Some("stable".to_string())],
+            "the override must be fingerprinted, not the directory default"
+        );
+    }
+
+    #[tokio::test]
+    async fn toolchain_override_mismatch_is_a_hard_error_even_in_an_unpinned_workspace() {
+        let script = vec![
+            hello_msg("node0"),
+            status_msg(true),
+            ev(JobEvent::Rejected {
+                id: JobId(1),
+                reason: RejectReason::ToolchainMismatch {
+                    server: fp("def"),
+                    client: fp("abc"),
+                },
+            }),
+        ];
+        let local = FakeTransport::scripted(vec![hello_msg("laptop")]);
+        let hooks = TestHooks::new(Some(FakeTransport::scripted(script)), Some(local.clone()));
+        let mut inp = input(&["+stable", "build"], Mode::Auto);
+        inp.pinned = false; // no rust-toolchain.toml — only the `+stable` override is the contract
+        assert_eq!(inp.toolchain_override, Some("stable".to_string()));
+        let code = run(inp, &hooks).await;
+        assert_eq!(
+            code, 1,
+            "an explicit +toolchain override is as binding as a pin file"
+        );
+        let calls = hooks.calls();
+        let err = String::from_utf8_lossy(&calls.err);
+        assert!(
+            err.contains("toolchain mismatch between laptop and node0"),
+            "{err}"
+        );
+        assert!(calls.exec.is_empty(), "no silent fallback");
+        assert_eq!(local.connect_count(), 0, "no local fallback");
+    }
+
+    #[test]
+    fn is_passthrough_treats_leading_flag_after_override_like_without_one() {
+        // `cargo +stable -v build`: argv[1] is the override, so the
+        // "subcommand" position is argv[2] == "-v" — a leading flag, handled
+        // identically to `cargo -v build` (no override): run the real cargo
+        // locally rather than guessing where the real subcommand is.
+        assert!(is_passthrough(Some("-v")));
+    }
+
+    #[tokio::test]
+    async fn toolchain_override_with_leading_flag_before_subcommand_is_passthrough() {
+        let remote = FakeTransport::scripted(vec![hello_msg("node0"), status_msg(true)]);
+        let hooks = TestHooks::new(Some(remote.clone()), Some(FakeTransport::default()));
+        let hooks = TestHooks {
+            exec_code: 0,
+            ..hooks
+        };
+        let code = run(input(&["+stable", "-v", "build"], Mode::Auto), &hooks).await;
+        assert_eq!(code, 0);
+        assert_eq!(
+            remote.connect_count(),
+            0,
+            "a leading flag after the override is passthrough, same as without one"
+        );
+        assert_eq!(
+            hooks.calls().exec,
+            vec![vec![
+                "cargo".to_string(),
+                "+stable".to_string(),
+                "-v".to_string(),
+                "build".to_string(),
+            ]],
+            "the full invocation, override included, must still reach the real cargo"
+        );
+    }
+
+    #[tokio::test]
+    async fn leading_flag_without_override_is_still_passthrough() {
+        // Regression guard: unrelated to this fix, but the combination test
+        // above only means something if the override-less case still
+        // behaves the same way it always did.
+        let remote = FakeTransport::scripted(vec![hello_msg("node0"), status_msg(true)]);
+        let hooks = TestHooks::new(Some(remote.clone()), Some(FakeTransport::default()));
+        let hooks = TestHooks {
+            exec_code: 0,
+            ..hooks
+        };
+        let code = run(input(&["-v", "build"], Mode::Auto), &hooks).await;
+        assert_eq!(code, 0);
+        assert_eq!(remote.connect_count(), 0);
+        assert_eq!(
+            hooks.calls().exec,
+            vec![vec![
+                "cargo".to_string(),
+                "-v".to_string(),
+                "build".to_string(),
+            ]]
+        );
     }
 }

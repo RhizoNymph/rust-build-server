@@ -179,8 +179,9 @@ impl shim::Hooks for RealHooks {
     fn fingerprint(
         &self,
         cwd: &Path,
+        toolchain: Option<&str>,
     ) -> Result<rbs_toolchain::ToolchainFingerprint, rbs_toolchain::ToolchainError> {
-        rbs_toolchain::fingerprint(cwd)
+        rbs_toolchain::fingerprint(cwd, toolchain)
     }
     async fn workspace_root(&self, cwd: &Path) -> Result<PathBuf, rbs_sync::SyncError> {
         rbs_sync::workspace_root(cwd).await

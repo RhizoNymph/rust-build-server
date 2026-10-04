@@ -156,18 +156,25 @@ impl Runner {
     /// Fingerprint this host's toolchain for `req.cwd` and compare with the client's.
     pub async fn check_toolchain(&self, req: &JobRequest) -> Result<(), Box<RejectReason>> {
         let cwd = req.cwd.clone();
-        let server_fp = tokio::task::spawn_blocking(move || rbs_toolchain::fingerprint(&cwd))
-            .await
-            .map_err(|e| {
-                Box::new(RejectReason::Internal(format!(
-                    "fingerprint task failed: {e}"
-                )))
-            })?
-            .map_err(|e| {
-                Box::new(RejectReason::Internal(format!(
-                    "toolchain fingerprint failed: {e}"
-                )))
-            })?;
+        // An explicit `cargo +<name> …` override on the client must be
+        // fingerprinted the same way on this host, not the directory's
+        // default toolchain, or two hosts could silently resolve the same
+        // override to two different installs with no mismatch ever detected.
+        let toolchain_override = req.toolchain_override.clone();
+        let server_fp = tokio::task::spawn_blocking(move || {
+            rbs_toolchain::fingerprint(&cwd, toolchain_override.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            Box::new(RejectReason::Internal(format!(
+                "fingerprint task failed: {e}"
+            )))
+        })?
+        .map_err(|e| {
+            Box::new(RejectReason::Internal(format!(
+                "toolchain fingerprint failed: {e}"
+            )))
+        })?;
         match rbs_toolchain::check(
             &req.client.hostname,
             &req.toolchain,
@@ -421,6 +428,7 @@ mod tests {
                 cargo_version: "cargo".into(),
                 toolchain_name: String::new(),
             },
+            toolchain_override: None,
             priority: Priority::Background,
             client: ClientIdentity {
                 hostname: "c".into(),

@@ -126,9 +126,17 @@ pub fn parse_rustc_vv(out: &str) -> Result<RustcVv, ToolchainError> {
     })
 }
 
-fn run(program: &'static str, args: &[&str], cwd: &Path) -> Result<String, ToolchainError> {
-    let path = std::env::var("PATH").unwrap_or_default();
-    run_with_path(program, args, cwd, &path)
+/// `args`, with an explicit `+toolchain` override prepended when one is
+/// given. Both the `rustc` and `cargo` rustup proxies accept this as the
+/// first argument and resolve it to a concrete toolchain install, exactly as
+/// cargo's own `+toolchain` syntax does.
+fn args_with_override<'a>(toolchain_override: Option<&'a str>, args: &[&'a str]) -> Vec<&'a str> {
+    let mut v = Vec::with_capacity(args.len() + 1);
+    if let Some(t) = toolchain_override {
+        v.push(t);
+    }
+    v.extend_from_slice(args);
+    v
 }
 
 fn run_with_path(
@@ -136,10 +144,13 @@ fn run_with_path(
     args: &[&str],
     cwd: &Path,
     path: &str,
+    toolchain_override: Option<&str>,
 ) -> Result<String, ToolchainError> {
+    let plus = toolchain_override.map(|t| format!("+{t}"));
+    let full_args = args_with_override(plus.as_deref(), args);
     let out = Command::new(program)
         .env("PATH", path)
-        .args(args)
+        .args(&full_args)
         .current_dir(cwd)
         // The rbs cargo shim honours this guard and execs the real cargo, so
         // fingerprinting from inside the shim can never recurse into itself.
@@ -165,12 +176,47 @@ fn run_with_path(
 ///
 /// Goes through the rustup proxies on `PATH` so `rust-toolchain.toml` and
 /// directory overrides are honoured exactly as cargo would.
-pub fn fingerprint(cwd: &Path) -> Result<ToolchainFingerprint, ToolchainError> {
-    let vv = parse_rustc_vv(&run("rustc", &["-vV"], cwd)?)?;
-    let cargo_version = run("cargo", &["-V"], cwd)?.trim().to_string();
-    let toolchain_name = run("rustup", &["show", "active-toolchain"], cwd)
-        .map(|s| s.split_whitespace().next().unwrap_or_default().to_string())
-        .unwrap_or_default();
+///
+/// `toolchain_override` is the name from an explicit `cargo +<name> …`
+/// invocation (without the leading `+`), when one was given. It takes
+/// precedence over the directory's own default: `rustc`/`cargo` are invoked
+/// as `rustc +<name> -vV` / `cargo +<name> -V`, exactly mirroring what the
+/// real cargo would resolve for that invocation. When present, it is also
+/// used directly as `toolchain_name` instead of querying `rustup show
+/// active-toolchain` (which only ever reports the directory's default and
+/// would be misleading here).
+pub fn fingerprint(
+    cwd: &Path,
+    toolchain_override: Option<&str>,
+) -> Result<ToolchainFingerprint, ToolchainError> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    fingerprint_with_path(cwd, &path, toolchain_override)
+}
+
+/// [`fingerprint`] parameterized by an explicit `PATH` (test-only entry
+/// point: it lets tests point at fake `rustc`/`cargo`/`rustup` binaries
+/// without mutating the process-wide `PATH` env var).
+fn fingerprint_with_path(
+    cwd: &Path,
+    path: &str,
+    toolchain_override: Option<&str>,
+) -> Result<ToolchainFingerprint, ToolchainError> {
+    let vv = parse_rustc_vv(&run_with_path(
+        "rustc",
+        &["-vV"],
+        cwd,
+        path,
+        toolchain_override,
+    )?)?;
+    let cargo_version = run_with_path("cargo", &["-V"], cwd, path, toolchain_override)?
+        .trim()
+        .to_string();
+    let toolchain_name = match toolchain_override {
+        Some(t) => t.to_string(),
+        None => run_with_path("rustup", &["show", "active-toolchain"], cwd, path, None)
+            .map(|s| s.split_whitespace().next().unwrap_or_default().to_string())
+            .unwrap_or_default(),
+    };
     Ok(ToolchainFingerprint {
         rustc_commit: vv.commit_hash,
         rustc_version: vv.release,
@@ -312,17 +358,87 @@ mod tests {
             Some(99),
             "sanity: fake cargo fails without guard"
         );
-        let r =
-            run_with_path("cargo", &["-V"], dir.path(), &path).expect("run() must set the guard");
+        let r = run_with_path("cargo", &["-V"], dir.path(), &path, None)
+            .expect("run() must set the guard");
         assert!(r.contains("9.9.9"));
     }
 
     #[test]
     fn fingerprint_runs_against_real_toolchain() {
         let dir = std::env::current_dir().expect("cwd");
-        let fp = fingerprint(&dir).expect("fingerprint");
+        let fp = fingerprint(&dir, None).expect("fingerprint");
         assert!(!fp.rustc_commit.is_empty());
         assert!(fp.cargo_version.starts_with("cargo "));
         assert!(fp.host.contains('-'));
+    }
+
+    /// A fake rustc/cargo/rustup that only succeeds when invoked with the
+    /// expected `+toolchain` as their first argument, proving `fingerprint`
+    /// actually forwards the override to both binaries rather than silently
+    /// fingerprinting the directory's default toolchain.
+    #[test]
+    fn fingerprint_forwards_explicit_toolchain_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path();
+        let write_fake = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, body).expect("write");
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .expect("chmod");
+        };
+        write_fake(
+            "rustc",
+            "#!/bin/sh\n[ \"$1\" = \"+nightly-2026-10-02\" ] || { echo \"bad args: $@\" >&2; exit 1; }\ncat <<'EOF'\nbinary: rustc\ncommit-hash: deadbeef00000000000000000000000000000000\ncommit-date: 2026-10-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0-nightly\nLLVM version: 21.1.0\nEOF\n",
+        );
+        write_fake(
+            "cargo",
+            "#!/bin/sh\n[ \"$1\" = \"+nightly-2026-10-02\" ] || { echo \"bad args: $@\" >&2; exit 1; }\necho \"cargo 1.100.0-nightly\"\n",
+        );
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let fp = fingerprint_with_path(dir.path(), &path, Some("nightly-2026-10-02"))
+            .expect("fingerprint with override");
+        assert_eq!(fp.rustc_commit, "deadbeef0");
+        assert_eq!(fp.rustc_version, "1.100.0-nightly");
+        assert_eq!(fp.cargo_version, "cargo 1.100.0-nightly");
+        assert_eq!(
+            fp.toolchain_name, "nightly-2026-10-02",
+            "override name is used directly, not queried from rustup"
+        );
+    }
+
+    /// Without an override, `fingerprint_with_path` still has to call
+    /// `rustup show active-toolchain` (the directory-default path) — proven
+    /// here by a fake `rustup` that fails unless invoked with no `+` prefix.
+    #[test]
+    fn fingerprint_without_override_queries_rustup_for_the_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path();
+        let write_fake = |name: &str, body: &str| {
+            let path = bin.join(name);
+            std::fs::write(&path, body).expect("write");
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .expect("chmod");
+        };
+        write_fake(
+            "rustc",
+            "#!/bin/sh\ncat <<'EOF'\nbinary: rustc\ncommit-hash: cafef00d00000000000000000000000000000000\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nEOF\n",
+        );
+        write_fake("cargo", "#!/bin/sh\necho \"cargo 1.95.0\"\n");
+        write_fake(
+            "rustup",
+            "#!/bin/sh\n[ \"$1\" = \"show\" ] && [ \"$2\" = \"active-toolchain\" ] || exit 1\necho \"1.95.0-x86_64-unknown-linux-gnu (directory override)\"\n",
+        );
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let fp =
+            fingerprint_with_path(dir.path(), &path, None).expect("fingerprint without override");
+        assert_eq!(fp.toolchain_name, "1.95.0-x86_64-unknown-linux-gnu");
     }
 }

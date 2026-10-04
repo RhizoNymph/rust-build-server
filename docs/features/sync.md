@@ -51,3 +51,17 @@ spawn error for a missing binary. No test touches the network or node0.
 - `.git/` is excluded: the remote worktree is a plain directory (git metadata not needed to build; avoids lock-file races with agents).
 - `target/` is never synced in either direction.
 - If rsync exits non-zero the job is not submitted to the remote.
+- The post-build pull-and-link step (client.md, `shim::run` step 7) depends
+  on kache's rustc-invocation cache keys matching between the remote build
+  and the local relink. This holds because `cwd` is identical on both hosts
+  (mirrored layout) and the default `CARGO_TARGET_DIR` (`target/` under
+  `cwd`) is therefore identical too. A workspace that overrides
+  `CARGO_TARGET_DIR` to some other *absolute* path keeps this property only
+  if that path is itself identical on both hosts (e.g. anywhere under the
+  mirrored `$HOME`); `rbs-sync` does not special-case a custom
+  `CARGO_TARGET_DIR` name (only the literal `target/` is excluded from the
+  push), so nothing here actively breaks that case, but nothing actively
+  verifies it either — this is a known, intentionally out-of-scope limitation
+  of the "same absolute path on both hosts" assumption, not something fixed
+  or reproduced as a distinct bug by the `+toolchain`-override work in
+  `docs/features/client.md`/`docs/features/toolchain.md`.
