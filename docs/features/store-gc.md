@@ -123,7 +123,8 @@ systemd user units and enables the timer. The client role installs neither.
   `load_index_or_empty`, `parse_datetime`, `IndexError`.
 - `crates/rbs-store/src/s3.rs` — `build_s3`, `S3Error`.
 - `crates/rbs-client/src/main.rs` — `Cmd::StoreGc` / `Cmd::StoreTouch`
-  dispatch; `RealHooks::spawn_touch` (detached spawn).
+  dispatch; `RealHooks::spawn_touch` (detached spawn via
+  `self_spawn::command`, see docs/features/client.md).
 - `crates/rbs-client/src/shim.rs` — `COMPILING_SUBCOMMANDS`, `wants_touch`,
   the post-build / pre-exec trigger (docs/features/client.md).
 - `crates/rbs-setup/src/setup.rs` — server-only unit install

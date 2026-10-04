@@ -3,6 +3,7 @@
 mod backend;
 mod local;
 mod real_cargo;
+mod self_spawn;
 mod shim;
 mod status;
 mod transport;
@@ -212,10 +213,13 @@ impl shim::Hooks for RealHooks {
     }
     fn spawn_touch(&self, dir: &Path) {
         use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         // Fully detached: own process group, no stdio. It must never block the
         // build or change its exit code; failure to spawn is only debug noise.
-        let result = Command::new(&self.exe)
+        // argv[0] is overridden (self_spawn::command) so this child runs as
+        // the `rbs` CLI even when `self.exe`'s path is the `cargo` shim
+        // hardlink — see self_spawn.rs.
+        let result = self_spawn::command(&self.exe)
             .arg("store-touch")
             .arg("--workspace")
             .arg(dir)

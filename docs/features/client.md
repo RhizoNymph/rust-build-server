@@ -89,6 +89,8 @@ remote build was never pulled back or locally relinked.
              server fingerprints the same override on its own mirrored cwd
              (`Runner::check_toolchain`) before comparing.
      local:  LocalTransport.connect() (autostart: spawn `<current_exe> server --socket P`
+             via self_spawn::command (argv[0] overridden to "rbs" so this
+             lands in cli_main even if <current_exe> is the cargo shim path)
              detached — own process group, stdio null — and retry ≤3 s); Hello; submit
      plain:  exec real cargo; return
    submit streams JobEvents: Stdout→stdout, Stderr→stderr, Queued → info
@@ -108,8 +110,10 @@ remote build was never pulled back or locally relinked.
 9. store-touch trigger: when cargo policy applies, `cfg.store.touch` is true and
    subcommand() ∈ COMPILING_SUBCOMMANDS (build, test, check, clippy, doc, bench, run),
    fire-and-forget `hooks.spawn_touch(dir)` → detached
-   `<current_exe> store-touch --workspace <dir>` (own process group, stdio
-   null; spawn failure = debug log). Server-backed jobs fire it after a
+   `<current_exe> store-touch --workspace <dir>` via self_spawn::command
+   (argv[0] overridden to "rbs", same reason as the local autostart above;
+   own process group, stdio null; spawn failure = debug log). Server-backed
+   jobs fire it after a
    successful exit (dir = cwd; the remote pull-and-link path fires with the
    already-resolved root). Every locally *exec'd* cargo replaces the process,
    so those paths fire it BEFORE the exec (the detached child outlives it):
@@ -146,11 +150,12 @@ discovered later in the chain; failure there falls through like any other).
 `Decision { chain, skipped: Vec<Skip { backend, reason: SkipReason }> }`.
 
 ## Files
-- `crates/rbs-client/src/main.rs` — argv[0] dispatch, clap CLI (incl. `rbs store-touch`), logging init, `RealHooks` (production `shim::Hooks`), signal future (SIGINT/SIGTERM).
+- `crates/rbs-client/src/main.rs` — argv[0] dispatch (`invoked_as_cargo`), clap CLI (incl. `rbs store-touch`), logging init, `RealHooks` (production `shim::Hooks`; `spawn_touch` uses `self_spawn::command`), signal future (SIGINT/SIGTERM).
 - `crates/rbs-client/src/shim.rs` — `ShimInput` (incl. `toolchain_override`, `subcommand()`, `hard_mismatch()`), `toolchain_override_token(argv)`, `Hooks` trait (remote/local transports, `fingerprint(cwd, toolchain)`, workspace_root, push, pull, exec_local, spawn_touch, stdout, stderr, cancel_signal), `run(input, &hooks) -> i32`, `submit` (event pump + cancel forwarding), `COMPILING_SUBCOMMANDS`.
 - `crates/rbs-client/src/backend.rs` — `Backend`, `RemoteProbe`, `SkipReason`, `Decision`, `select()`.
 - `crates/rbs-client/src/transport.rs` — `Transport` / `Conn` traits (boxed futures, object-safe), `Framed<R,W>` newline-JSON duplex, `UnixTransport`, `SshTransport` (`ssh -o BatchMode=yes -o ConnectTimeout=<ceil secs> <host> rbs proxy`, child kept alive by the conn, killed on drop), `FakeTransport` (test-only: scripted replies, records sends, counts connects), `probe()`, `hello()`, `probe_with_timeout()`.
-- `crates/rbs-client/src/local.rs` — `LocalTransport` (unix socket + autostart/retry).
+- `crates/rbs-client/src/local.rs` — `LocalTransport` (unix socket + autostart/retry; autostart spawn uses `self_spawn::command`).
+- `crates/rbs-client/src/self_spawn.rs` — `command(program) -> Command`, `SAFE_ARGV0`: builds a detached self-spawn with argv[0] explicitly overridden (`CommandExt::arg0`) so the child's own `invoked_as_cargo()` is always `false`, regardless of what `program`'s file name is. Shared by `main.rs::RealHooks::spawn_touch` and `local.rs::LocalTransport::spawn_server` — both exec `self.exe`, which IS the `cargo` shim hardlink/symlink's path when the current process was itself invoked as `cargo`.
 - `crates/rbs-client/src/real_cargo.rs` — `resolve`, `find`, `command`, `exec`, `shim_active`, `SHIM_ACTIVE_ENV`.
 - `crates/rbs-client/src/status.rs` — `rbs status` probing and line formatting.
 
@@ -175,6 +180,7 @@ discovered later in the chain; failure there falls through like any other).
   unchanged by override support).
 - `real_cargo`: PATH walk skips the shim dir, CARGO_HOME / ~/.cargo preference, non-executables ignored, env of the exec'd command.
 - `local`: fails fast without autostart, spawn failure reported, autostart connects once the (fake, python3) server listens.
+- `self_spawn`: the built `Command`'s argv[0] is the override (not the program's file name), verified by actually spawning `/bin/sh -c 'printf %s "$0"'` and reading `$0` back — including the exact bug scenario where `program`'s path is a symlink literally named `cargo`.
 - `status`: line formatting for ok / unavailable.
 
 ## Invariants
@@ -186,4 +192,5 @@ discovered later in the chain; failure there falls through like any other).
 - A `+toolchain` override, when present, can only appear at `argv[1]` (cargo's own grammar); `ShimInput::subcommand()` skips it to find the real subcommand (or a leading flag) and is the single source every subcommand-dependent decision in `run()` reads from — see "Subcommand detection" above.
 - All fallbacks are logged at `warn` with the reason.
 - `rbs status` and the shim never contact the remote when `remote.enabled = false` or mode ∈ {local, plain}.
+- `invoked_as_cargo()` dispatch is purely on argv[0]'s file name. Every detached self-spawn of `self.exe` (store-touch after a build, local-server autostart) goes through `self_spawn::command`, which overrides argv[0] to `"rbs"` via `CommandExt::arg0`. Without this, when the running process was itself invoked as `cargo` through the shim hardlink/symlink, `self.exe`'s file name IS `cargo`, so the child's own `invoked_as_cargo()` would return `true` and it would re-enter the shim: `store-touch` got submitted as a remote/local *job* (`argv=["cargo","store-touch",…]`, failing with "could not find Cargo.toml") instead of running `Cmd::StoreTouch`, and the autostart child fell through toolchain fingerprinting instead of starting `rbs server`.
 - **Known limitation (unrelated to `+toolchain` overrides):** the post-build pull-and-link step (`rbs_sync::pull` + local `cargo build`) relies on kache's cache keys matching between the remote build and the local relink, which in turn relies on `CARGO_TARGET_DIR` (if set) being the *same absolute path string* on both hosts — true by construction for the default `target/` inside the (mirrored-path) workspace root, and still true for an explicit `CARGO_TARGET_DIR` as long as it resolves to the identical absolute path on both machines (e.g. an absolute path under the mirrored `$HOME`). `rbs-sync`'s rsync push only ever excludes a literal `target/`; a custom `CARGO_TARGET_DIR` directory name is not specially excluded or included. This was not changed by the `+toolchain` fix and was not reproducible as a distinct bug in testing — see `docs/features/sync.md`'s Invariants for the underlying assumption.
