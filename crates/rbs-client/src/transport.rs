@@ -391,6 +391,7 @@ mod tests {
                 cargo_version: "cargo 1.95.0".into(),
                 toolchain_name: String::new(),
             },
+            toolchain_override: None,
             priority: Priority::Agent,
             client: ClientIdentity {
                 hostname: "laptop".into(),

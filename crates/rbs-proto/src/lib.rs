@@ -75,6 +75,7 @@ mod tests {
                 cargo_version: "cargo 1.95.0".into(),
                 toolchain_name: "1.95.0-x86_64-unknown-linux-gnu".into(),
             },
+            toolchain_override: None,
             priority: Priority::Agent,
             client: ClientIdentity {
                 hostname: "framework".into(),

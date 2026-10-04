@@ -75,6 +75,14 @@ pub struct JobRequest {
     pub env: BTreeMap<String, String>,
     /// Client's toolchain for `cwd`; the server verifies it matches its own.
     pub toolchain: ToolchainFingerprint,
+    /// Explicit `cargo +<name> …` override from the client's argv, without
+    /// the leading `+`, when one was given. The server must fingerprint
+    /// `cwd` with this same override (instead of the directory's default)
+    /// so the mismatch check compares the toolchain the command actually
+    /// asked for, and must treat a mismatch here as a hard error exactly
+    /// like a `rust-toolchain.toml` pin (see `rbs_toolchain::fingerprint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_override: Option<String>,
     pub priority: Priority,
     pub client: ClientIdentity,
     /// Whether the client's stdout is a terminal (server may allocate a pty / enable colour).
