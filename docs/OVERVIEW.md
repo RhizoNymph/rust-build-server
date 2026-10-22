@@ -125,6 +125,14 @@ Features Index:
     entry_points: [crates/rbs-store/src/lib.rs, "rbs store-gc", "rbs store-touch"]
     depends_on: [config, sync, setup]
     doc: docs/features/store-gc.md
+  install:
+    description: >
+      Makefile: build + atomic install, `rbs setup`, shim PATH line, Claude
+      Code sandbox exclusions so agents' cargo reaches the server, doctor,
+      fleet upgrade.
+    entry_points: [Makefile, "make all", "make sandbox"]
+    depends_on: [setup, bootstrap, client]
+    doc: docs/features/install.md
 ```
 
 ## Environment facts the design relies on

@@ -81,7 +81,26 @@ Or straight from git with cargo:
 cargo install --git https://github.com/RhizoNymph/rust-build-server rbs
 ```
 
-Or from a checkout: `cargo build --release && install -m755 target/release/rbs ~/.local/bin/rbs`.
+Or from a checkout, with the Makefile (build, install, `rbs setup`, shim on
+PATH, Claude Code sandbox exclusions, doctor):
+
+```sh
+make all REMOTE_HOST=<server>   # first install
+make install                    # upgrade this machine later
+make fleet                      # upgrade this machine, then every [bootstrap] host
+make help                       # everything else
+```
+
+### Claude Code agents
+
+Claude Code's Bash sandbox blocks the shim's ssh and unix-socket connections,
+so a sandboxed `cargo build` quietly runs locally. `make sandbox` adds
+rbs's commands to `sandbox.excludedCommands` in `~/.claude/settings.json`:
+`cargo build|check|test|clippy|bench|doc|nextest`, plus `cd`, `tail`, `head`,
+`grep`, because a chained command like `cd x && cargo test | tail` is only
+excluded when every part matches. `make agent-guidance` optionally adds a
+note to `~/.claude/CLAUDE.md` telling agents to keep cargo calls in that
+shape. See [docs/features/install.md](docs/features/install.md).
 
 ## Quick start
 
